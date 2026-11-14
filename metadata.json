@@ -1,0 +1,6 @@
+{
+  "name": "Gatekeep Sports Desk — Multi-Sport Props Terminal",
+  "description": "Quantitative player props desk for NFL Receptions (v1.4 Negative Binomial), MLB 0.5-Hits (v5.8 11-step engine), and NHL Shots on Goal (sog_v1 r=15.13).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

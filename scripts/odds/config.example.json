@@ -1,0 +1,39 @@
+{
+  "comment": "Copy to config.local.json and set real prop page URLs. config.local.json should not be committed.",
+  "max_pages_per_run": 12,
+  "headed": true,
+  "timeout_ms": 60000,
+  "books": {
+    "bet99": {
+      "nba": ["https://REPLACE_WITH_BET99_NBA_PLAYER_PROPS_URL"],
+      "nhl": ["https://REPLACE_WITH_BET99_NHL_PLAYER_PROPS_URL"],
+      "nfl": ["https://REPLACE_WITH_BET99_NFL_RECEIVING_PROPS_URL"],
+      "mlb": ["https://REPLACE_WITH_BET99_MLB_HITS_PROPS_URL"]
+    },
+    "bet365": {
+      "nba": ["https://REPLACE_WITH_BET365_NBA_PLAYER_PROPS_URL"],
+      "nhl": ["https://REPLACE_WITH_BET365_NHL_PLAYER_PROPS_URL"],
+      "nfl": ["https://REPLACE_WITH_BET365_NFL_RECEIVING_PROPS_URL"],
+      "mlb": ["https://REPLACE_WITH_BET365_MLB_HITS_PROPS_URL"]
+    }
+  },
+  "selectors": {
+    "comment": "Fill these after inspecting a saved page. Leave null to use heuristic table parse on page content.",
+    "bet99": {
+      "row": null,
+      "player": null,
+      "market": null,
+      "line": null,
+      "over": null,
+      "under": null
+    },
+    "bet365": {
+      "row": null,
+      "player": null,
+      "market": null,
+      "line": null,
+      "over": null,
+      "under": null
+    }
+  }
+}

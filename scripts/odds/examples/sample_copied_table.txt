@@ -1,0 +1,4 @@
+Player	Market	Line	Over	Under
+Jalen Johnson	points	21.5	-115	-105
+Jalen Johnson	rebounds	9.5	-110	-110
+Dyson Daniels	assists	4.5	+100	-120

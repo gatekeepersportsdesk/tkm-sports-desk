@@ -1,0 +1,4 @@
+[
+  {"book": "bet99", "sport": "nhl", "player": "Auston Matthews", "market": "Shots on Goal", "line": 3.5, "over": -120, "under": 100, "asOf": "2026-10-29T23:00:00Z"},
+  {"book": "bet365", "sport": "nhl", "player": "Auston Matthews", "market": "Points", "line": 0.5, "over": -140, "under": 110, "asOf": "2026-10-29T23:00:00Z"}
+]

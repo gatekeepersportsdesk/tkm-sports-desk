@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gatekeep Sports Desk — Multi-Sport Props Terminal</title>
+    <meta name="description" content="Quantitative player props desk for NFL Receptions (v1.4 Negative Binomial), MLB 0.5-Hits (v5.8 11-step engine), and NHL Shots on Goal (sog_v1 r=15.13)." />
+    <meta property="og:title" content="Gatekeep Sports Desk — Multi-Sport Props Terminal" />
+    <meta property="og:description" content="Quantitative player props desk for NFL Receptions (v1.4 Negative Binomial), MLB 0.5-Hits (v5.8 11-step engine), and NHL Shots on Goal (sog_v1 r=15.13)." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600;700&family=Oswald:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      // Ignore Vite HMR WebSocket connection errors in sandbox iframe environment
+      window.addEventListener('error', function(event) {
+        var msg = (event && event.message) || '';
+        var file = (event && event.filename) || '';
+        if (msg.includes('WebSocket') || msg.includes('@vite/client') || file.includes('@vite/client')) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event && event.reason;
+        var msg = (reason && (reason.message || String(reason))) || '';
+        var stack = (reason && reason.stack) || '';
+        if (msg.includes('WebSocket') || stack.includes('@vite/client') || stack.includes('createWebSocketModuleRunnerTransport')) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      }, true);
+    </script>
+  </head>
+  <body class="bg-[#0b0f14] text-[#e6edf5] font-sans antialiased selection:bg-cyan-500 selection:text-black min-h-screen">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

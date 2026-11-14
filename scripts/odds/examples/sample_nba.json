@@ -1,0 +1,52 @@
+[
+  {
+    "book": "bet365",
+    "sport": "nba",
+    "player": "Jalen Johnson",
+    "market": "points",
+    "line": 21.5,
+    "over": -115,
+    "under": -105,
+    "asOf": "2026-10-29T23:00:00Z"
+  },
+  {
+    "book": "bet365",
+    "sport": "nba",
+    "player": "Jalen Johnson",
+    "market": "points",
+    "line": 24.5,
+    "over": 150,
+    "under": -185,
+    "asOf": "2026-10-29T23:00:00Z"
+  },
+  {
+    "book": "bet99",
+    "sport": "nba",
+    "player": "Jalen Johnson",
+    "market": "points",
+    "line": 24.5,
+    "over": 140,
+    "under": -170,
+    "asOf": "2026-10-29T23:00:00Z"
+  },
+  {
+    "book": "bet99",
+    "sport": "nba",
+    "player": "Jalen Johnson",
+    "market": "3-Pointers Made",
+    "line": 1.5,
+    "over": -110,
+    "under": -110,
+    "asOf": "2026-10-29T23:00:00Z"
+  },
+  {
+    "book": "bet99",
+    "sport": "nba",
+    "player": "Giannis Antetokounmpo",
+    "market": "rebounds",
+    "line": 11.5,
+    "over": -120,
+    "under": 100,
+    "asOf": "2026-10-29T23:00:00Z"
+  }
+]

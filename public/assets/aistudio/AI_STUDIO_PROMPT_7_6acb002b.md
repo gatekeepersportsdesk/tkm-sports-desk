@@ -1,0 +1,17 @@
+# Gatekeep Sports Desk — Update 7: automatic daily card + auto-grading (NBA), version badge, stricter no-reload
+
+IMPORTANT — MERGE, DO NOT OVERWRITE. Your copy already has things my zip does not (multi-screenshot upload, a "Snapshot All Predictions" button, a self-grading UI shell on History & Calibration). Keep all of those working. Apply this update as a patch on top of your current project: the attached `update7.patch` (unified diff against Update 6) lists every changed file, and the new files are in the zip. Where a hunk does not apply because your file differs, re-implement the same behaviour in your version of the file. Do not change pricing, gates, joint logic or honesty rules: STAB/FADE still need a real two-way price and EV > 0 at the offered price.
+
+## What to do
+1. **One ledger, not two.** If your "Snapshot All Predictions" stores rows in its own format, map it onto the new `NbaPrediction` type (`src/types/nba.ts`) and the functions in `src/lib/nba_card.ts` (`captureDailyCard`, `mergePredictions`, `gradePredictions`, `summarizePredictions`). Keep your button, but make it only a "force add missing rows" action: it calls the same capture and never rewrites an existing row.
+2. **Auto-capture (no click).** In `App.tsx` the effect on `[nbaBase, nbaGames, nbaState, nbaDate]` captures every priced player-market for games that are still `pre`, for today or later only. Do not capture past slates or in-progress games, skip players listed Out/IR/inactive, never overwrite an existing row.
+3. **Auto-grade.** `nbaAutoGrade` runs after the slate loads, when History & Calibration opens, on tab focus (max once per 5 minutes) and on the button. VOID = did not play / 0 minutes (excluded from every statistic). Rows store actual, minutes, error (actual − μ) and a factual reason string.
+4. **Scoreboard** (`src/components/nba/NbaCardBoard.tsx`, rendered at the top of `NbaScoreboard.tsx`): win rate with the always-UNDER baseline beside it, OVER vs UNDER accuracy, Brier, MAE vs season average per market, bias, coverage 50/80/90, filters All / Won / Missed / Pending / Edge plays + per market, estimated/unknown rows hidden from the headline by default. If your History page already has similar tiles, keep one set (this one, wired to the new rows).
+5. **Version badge:** `Header.tsx` shows `nba_v2 · 7 markets`. Search the project for any other visible "nba_v1" and change it.
+6. **Reloads:** `server.ts` keeps HMR and file watching OFF unless `GATEKEEP_ENABLE_HMR=true` (ignore whether `DISABLE_HMR` is set). No effect may poll on a timer or remount the app; NBA data loads once per date with a 10-minute cache. `session_diag.ts` gained `installScrollRestore`, used in `App.tsx`. Keep the "Page was reloaded" banner. If it still appears, paste its text and the first `[gatekeep] HMR/file-watching` line from the server console.
+
+## Verify and report (short)
+1. `npx tsc --noEmit` and `npm test` (136 tests when merged onto Update 6). Report type errors verbatim; fix type errors only.
+2. Open the NBA tab before tip-off: History & Calibration should show rows logged with no click, status line "Auto-logged N player-market projection(s)…". Come back after the games are final: rows grade by themselves (or press "Grade now"); a player who did not play shows VOID.
+3. Tell me exactly: how the refresh issue was addressed, that the badge reads nba_v2, that auto-snapshot and auto-grade are on, and anything still manual.
+4. Do not add NHL/NFL automatic cards in this step (NBA first), and do not tune the model on the first days of results.
