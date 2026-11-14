@@ -1,20 +1,22 @@
 /**
- * Gatekeep Sports Desk — Self-Grading Engine for Today's Plays Picker
+ * Gatekeep Sports Desk — Self-Grading Engine & Seeded History Ledger for Today's Plays Picker
  *
  * Requirements:
- * 1. Freeze membership in that day's Edge / Safe / Avoid snapshots at board lock or at first grade
- *    for the slate date (do not reshuffle historical membership after the fact).
- * 2. When games finalize / box scores grade (same pipeline as daily card grading), grade membership.
- * 3. Use REAL graded outcomes only; void DNP (exclude from hit rate); exclude pending from rates.
- * 4. Aggregate picker performance across scopes:
- *    - 'today': Current slate date
- *    - '7d': Last 7 days
- *    - 'all': Cumulative
- * 5. Track Edge, Safe, and Avoid buckets.
+ * 1. Freeze membership in that day's exclusive Edge / Safe / Avoid snapshots at board lock or odds import.
+ *    Strict precedence:
+ *      a) EDGE: valid odds + valid edge + edge > 0 + prob >= 0.55
+ *      b) else SAFE: valid odds + valid edge + prob >= safeThreshold
+ *      c) else AVOID: no odds or below thresholds
+ *    A play MUST appear in ONLY ONE bucket (Edge plays NEVER double-list under Safe).
+ * 2. Persist POTD crown (`isPotd: true`) on snapshots so History displays the crowned play & outcome.
+ * 3. Idempotent historical CSV seeding (`gatekeep_picker_seed_full_clean.csv` & `_game_by_game_clean.csv`)
+ *    for decided NHL and NBA rows only — NEVER seed NFL picker history and NEVER wipe user snapshots.
  */
 
 import { PlayItem } from '../components/common/TodaysPlaysSection';
 import { CardRow } from './card_core';
+import { PickOfTheDay } from './pick_of_the_day';
+import { americanToDecimal } from './odds';
 
 export interface GradedPickerPlay {
   id: string | number;
@@ -32,6 +34,8 @@ export interface GradedPickerPlay {
   isEdge: boolean;
   isSafe: boolean;
   isAvoid: boolean;
+  isPotd?: boolean;
+  matchup?: string;
   result: 'HIT' | 'MISS' | 'PUSH' | 'VOID' | null;
   actual: number | null;
 }
@@ -41,6 +45,7 @@ export interface DailyPickerSnapshot {
   date: string;
   timestamp: number;
   safeThreshold: number;
+  seeded?: boolean;
   plays: GradedPickerPlay[];
 }
 
@@ -60,12 +65,31 @@ export interface PickerPerformanceSummary {
   edge: BucketStats;
   safe: BucketStats;
   avoid: BucketStats;
+  potd?: BucketStats;
   totalDecided: number;
   totalPending: number;
 }
 
+export interface SeededGameRollup {
+  date: string;
+  sport: string;
+  matchup: string;
+  totalPlays: number;
+  edgePlays: number;
+  safePlays: number;
+  hits: number;
+  misses: number;
+  pushes: number;
+  voids: number;
+  pending: number;
+  decided: number;
+  winRatePct: number | null;
+}
+
 const PICKER_PREFIX = 'gatekeep_picker_snap_v1_';
 const INDEX_PREFIX = 'gatekeep_picker_dates_v1_';
+const SEED_DONE_KEY = 'gatekeep_picker_seed_hydrated_v1';
+const SEED_GBG_KEY = 'gatekeep_picker_seed_gbg_v1';
 
 export function normalizePlayerName(name: string): string {
   return (name || '')
@@ -82,14 +106,60 @@ export function normalizeMarketKey(m: string): string {
   if (s === 'pts' || s === 'points' || s.includes('point')) return 'points';
   if (s === 'rec' || s === 'receptions' || s.includes('rec')) return 'receptions';
   if (s === 'hit' || s === 'hits' || s.includes('hit')) return 'hits';
-  if (s === 'tpm' || s === 'threes' || s.includes('three')) return 'threes';
+  if (s === 'tpm' || s === 'threes' || s.includes('three') || s === '3pm') return 'threes';
   if (s === 'reb' || s === 'rebounds' || s.includes('reb')) return 'rebounds';
   if (s === 'ast' || s === 'assists' || s.includes('assist')) return 'assists';
+  if (s === 'stl' || s === 'steals' || s.includes('steal')) return 'steals';
+  if (s === 'blk' || s === 'blocks' || s.includes('block')) return 'blocks';
   if (s === 'pra') return 'pra';
   return s;
 }
 
+/**
+ * Exclusive bucket assignment:
+ *  1. EDGE if valid odds + valid edge + edge > 0 + prob >= 0.55
+ *  2. else SAFE if valid odds + valid edge + prob >= safeThreshold
+ *  3. else AVOID
+ */
+export function classifyPickerBucket(
+  prob: number,
+  edge: number | null | undefined,
+  hasOdds: boolean,
+  safeThreshold = 0.58
+): { isEdge: boolean; isSafe: boolean; isAvoid: boolean } {
+  const validEdge = edge != null && Number.isFinite(edge) && Math.abs(edge) <= 50;
+  const pricedValid = hasOdds && validEdge;
+  const isEdge = pricedValid && (edge as number) > 0 && prob >= 0.55;
+  const isSafe = !isEdge && pricedValid && prob >= safeThreshold;
+  const isAvoid = !isEdge && !isSafe;
+  return { isEdge, isSafe, isAvoid };
+}
+
+/** Normalize a snapshot play in-place/copy so Edge & Safe are strictly mutually exclusive. */
+function ensureExclusivePlay(p: GradedPickerPlay): GradedPickerPlay {
+  if (p.isEdge && p.isSafe) {
+    return { ...p, isSafe: false, isAvoid: false };
+  }
+  if (!p.isEdge && !p.isSafe && !p.isAvoid) {
+    return { ...p, isAvoid: true };
+  }
+  return p;
+}
+
+export function isMatchingPotd(
+  p: Pick<PlayItem | GradedPickerPlay, 'player' | 'market' | 'side' | 'line'>,
+  potd: PickOfTheDay | null | undefined
+): boolean {
+  if (!potd) return false;
+  if (normalizePlayerName(p.player) !== normalizePlayerName(potd.player)) return false;
+  if (normalizeMarketKey(p.market) !== normalizeMarketKey(potd.market)) return false;
+  if (String(p.side).toUpperCase() !== String(potd.side).toUpperCase()) return false;
+  return Math.abs(Number(p.line) - Number(potd.line)) < 1e-6;
+}
+
 const memoryStore = new Map<string, string>();
+let seededGbgCache: SeededGameRollup[] | null = null;
+let seedClientPromise: Promise<number> | null = null;
 
 function getItem(key: string): string | null {
   if (typeof localStorage !== 'undefined') {
@@ -121,7 +191,7 @@ export function getStoredDates(sport: string): string[] {
 
 export function saveStoredDates(sport: string, dates: string[]): void {
   try {
-    setItem(`${INDEX_PREFIX}${sport}`, JSON.stringify(Array.from(new Set(dates))));
+    setItem(`${INDEX_PREFIX}${sport}`, JSON.stringify(Array.from(new Set(dates)).sort()));
   } catch { /* ignore */ }
 }
 
@@ -138,53 +208,72 @@ export function clearDailyPickerSnapshot(sport: string, date: string): void {
 }
 
 /**
- * Loads a frozen snapshot for a specific date and sport.
+ * Loads a frozen snapshot for a specific date and sport (enforces exclusive buckets on read).
  */
 export function getDailyPickerSnapshot(sport: string, date: string): DailyPickerSnapshot | null {
   try {
     const raw = getItem(`${PICKER_PREFIX}${sport}_${date}`);
     if (raw) {
-      return JSON.parse(raw) as DailyPickerSnapshot;
+      const parsed = JSON.parse(raw) as DailyPickerSnapshot;
+      if (parsed && Array.isArray(parsed.plays)) {
+        return {
+          ...parsed,
+          plays: parsed.plays.map(ensureExclusivePlay)
+        };
+      }
+      return parsed;
     }
   } catch { /* ignore */ }
   return null;
 }
 
-
 /**
- * Freezes membership in today's picker buckets.
- * - If a snapshot for this date already exists and forceOverwrite is false: returns existing snapshot untouched.
- * - When forceOverwrite is true (e.g. on new odds import or force re-log): re-evaluates buckets with fresh odds
- *   while preserving any already-decided graded results.
+ * Freezes membership in today's exclusive picker buckets and persists POTD crown (`isPotd`).
  */
 export function freezePickerSnapshot(
   sport: string,
   date: string,
   plays: PlayItem[],
   safeThreshold = 0.58,
-  forceOverwrite = false
+  forceOverwrite = false,
+  potd?: PickOfTheDay | null
 ): DailyPickerSnapshot | null {
   if (!date) return null;
 
-  // 1. Check if already frozen for this slate date
   const existing = getDailyPickerSnapshot(sport, date);
   if (existing && existing.plays.length > 0 && !forceOverwrite) {
-    return existing; // Frozen, do not reshuffle historical membership
+    // Preserve frozen membership; only stamp `isPotd` if no play is stamped yet and `potd` matches
+    if (potd && !existing.plays.some(x => x.isPotd)) {
+      let stamped = false;
+      const updatedPlays = existing.plays.map(x => {
+        if (!stamped && isMatchingPotd(x, potd)) {
+          stamped = true;
+          return { ...x, isPotd: true };
+        }
+        return x;
+      });
+      if (stamped) {
+        const updatedSnap: DailyPickerSnapshot = { ...existing, plays: updatedPlays };
+        setItem(`${PICKER_PREFIX}${sport}_${date}`, JSON.stringify(updatedSnap));
+        return updatedSnap;
+      }
+    }
+    return existing;
   }
 
   if (plays.length === 0) return null;
 
-  // 2. Classify each play into the buckets
+  let potdStamped = false;
   const gradedPlays: GradedPickerPlay[] = plays.map(p => {
     const prob = p.pLean ?? p.prob ?? 0.5;
     const hasOdds = (p.hasMarket !== false) && (p.hasOdds !== false) && p.odds != null;
+    const { isEdge, isSafe, isAvoid } = classifyPickerBucket(prob, p.edge, hasOdds, safeThreshold);
 
-    const isAvoid = !hasOdds || prob < 0.50;
-    const isEdge = !isAvoid && p.edge > 0 && prob >= 0.55;
-    const isSafe = !isAvoid && prob >= safeThreshold;
-
-    // Retain previous result if this identical play was already graded
-    const prev = existing?.plays.find(x => x.id === p.id || (x.player === p.player && x.market === p.market && x.side === p.side && x.line === p.line));
+    const prev = existing?.plays.find(
+      x => x.id === p.id || (x.player === p.player && x.market === p.market && x.side === p.side && x.line === p.line)
+    );
+    const matchedPotd = !potdStamped && (Boolean(p.isPotd) || isMatchingPotd(p, potd));
+    if (matchedPotd) potdStamped = true;
 
     return {
       id: p.id,
@@ -201,6 +290,7 @@ export function freezePickerSnapshot(
       isEdge,
       isSafe,
       isAvoid,
+      isPotd: matchedPotd || prev?.isPotd || false,
       modelMu: p.modelMu ?? prev?.modelMu,
       result: prev?.result ?? null,
       actual: prev?.actual ?? null
@@ -227,6 +317,311 @@ export function freezePickerSnapshot(
   return snapshot;
 }
 
+/* ============================================================================
+ * SEED CSV PARSERS & IDEMPOTENT HYDRATION (NHL & NBA ONLY — NEVER NFL)
+ * ============================================================================ */
+
+function parseCsvRows(csv: string): Record<string, string>[] {
+  const lines = csv.split(/\r?\n/).filter(l => l.trim().length > 0 && !l.startsWith('#'));
+  if (lines.length < 2) return [];
+  const parseLine = (line: string): string[] => {
+    const out: string[] = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = !inQuotes;
+      } else if (ch === ',' && !inQuotes) {
+        out.push(cur.trim());
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(cur.trim());
+    return out;
+  };
+  const headers = parseLine(lines[0]);
+  const out: Record<string, string>[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const vals = parseLine(lines[i]);
+    if (vals.length < 4) continue;
+    const obj: Record<string, string> = {};
+    headers.forEach((h, idx) => { obj[h] = vals[idx] ?? ''; });
+    out.push(obj);
+  }
+  return out;
+}
+
+function parsePctToUnit(val: string): number {
+  const clean = (val || '').replace('%', '').trim();
+  const n = parseFloat(clean);
+  if (!Number.isFinite(n)) return 0.5;
+  return n > 1 ? n / 100 : n;
+}
+
+function parseSeedResult(res: string): GradedPickerPlay['result'] {
+  const s = (res || '').toUpperCase().trim();
+  if (s === 'WON' || s === 'HIT' || s === 'WIN') return 'HIT';
+  if (s === 'LOST' || s === 'MISS' || s === 'LOSS') return 'MISS';
+  if (s === 'VOID' || s === 'DNP') return 'VOID';
+  if (s === 'PUSH') return 'PUSH';
+  return null;
+}
+
+export function parseSeedGameByGameCsv(csv: string): SeededGameRollup[] {
+  const rows = parseCsvRows(csv);
+  const out: SeededGameRollup[] = [];
+  for (const r of rows) {
+    const sport = (r.Sport || '').toUpperCase().trim();
+    if (sport !== 'NHL' && sport !== 'NBA') continue; // Never seed NFL
+    const wrStr = (r.Win_Rate_Pct || '').replace('%', '').trim();
+    const wr = parseFloat(wrStr);
+    out.push({
+      date: (r.Date || '').trim(),
+      sport,
+      matchup: (r.Matchup || '').trim(),
+      totalPlays: parseInt(r.Total_Plays, 10) || 0,
+      edgePlays: parseInt(r.Edge_Plays, 10) || 0,
+      safePlays: parseInt(r.Safe_Plays, 10) || 0,
+      hits: parseInt(r.Hits_Won, 10) || 0,
+      misses: parseInt(r.Misses_Lost, 10) || 0,
+      pushes: parseInt(r.Pushes, 10) || 0,
+      voids: parseInt(r.Voids, 10) || 0,
+      pending: parseInt(r.Pending, 10) || 0,
+      decided: parseInt(r.Decided, 10) || 0,
+      winRatePct: Number.isFinite(wr) ? wr : null
+    });
+  }
+  return out;
+}
+
+export function getSeededGameByGameRollups(sport?: string): SeededGameRollup[] {
+  if (!seededGbgCache) {
+    try {
+      const raw = getItem(SEED_GBG_KEY);
+      if (raw) seededGbgCache = JSON.parse(raw) as SeededGameRollup[];
+    } catch { /* ignore */ }
+  }
+  const all = seededGbgCache || [];
+  if (!sport || sport === 'all') return all;
+  return all.filter(r => r.sport.toLowerCase() === sport.toLowerCase());
+}
+
+/**
+ * Idempotently imports `gatekeep_picker_seed_full_clean.csv` and optional `gatekeep_picker_seed_game_by_game_clean.csv`.
+ * - Decided NHL & NBA rows only (skips NFL unconditionally).
+ * - Never overwrites pre-existing user snapshots for a given `(sport, date)`.
+ * - Classifies exclusively: EDGE > SAFE > AVOID.
+ * - Marks single best-EV priced play per `(sport, date)` as `isPotd: true` so History displays POTD crowns.
+ */
+export function seedPickerHistoryFromCsv(
+  fullCsv: string,
+  gbgCsv?: string,
+  options?: { force?: boolean }
+): { importedDates: number; importedPlays: number; skippedDates: number } {
+  if (gbgCsv) {
+    const rollups = parseSeedGameByGameCsv(gbgCsv);
+    seededGbgCache = rollups;
+    setItem(SEED_GBG_KEY, JSON.stringify(rollups));
+  }
+
+  const rows = parseCsvRows(fullCsv);
+  if (rows.length === 0) return { importedDates: 0, importedPlays: 0, skippedDates: 0 };
+
+  // Group decided NHL & NBA rows by `${sport}_${date}`
+  const byBucketKey = new Map<string, { sport: string; date: string; plays: GradedPickerPlay[] }>();
+
+  let rowIdx = 0;
+  for (const r of rows) {
+    rowIdx++;
+    const sportRaw = (r.Sport || '').trim().toUpperCase();
+    if (sportRaw !== 'NHL' && sportRaw !== 'NBA') continue; // Never seed NFL
+    const sport = sportRaw.toLowerCase();
+    const date = (r.Date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+
+    const result = parseSeedResult(r.Result);
+    if (result === null) continue; // Only seed decided rows
+
+    const rawOdds = (r.Odds || '').trim().replace(/^\+/, '');
+    const parsedOdds = rawOdds ? Number(rawOdds) : NaN;
+    const odds = Number.isFinite(parsedOdds) && parsedOdds !== 0 ? Math.round(parsedOdds) : null;
+    const prob = parsePctToUnit(r.Model_Win_Prob);
+    const muVal = parseFloat(r.Model_Mu);
+    const modelMu = Number.isFinite(muVal) ? muVal : undefined;
+    const edgeVal = parseFloat(r.Edge_pp);
+    const edge = Number.isFinite(edgeVal) ? edgeVal : 0;
+    const lineVal = parseFloat(r.Line);
+    const line = Number.isFinite(lineVal) ? lineVal : 0.5;
+    const actVal = parseFloat(r.Actual_Stat);
+    const actual = Number.isFinite(actVal) ? actVal : null;
+    const rawBuckets = (r.Buckets || '').toUpperCase();
+    const hasOdds = odds != null;
+
+    // Enforce exclusive bucket assignment (Edge > Safe > Avoid)
+    let isEdge = false;
+    let isSafe = false;
+    let isAvoid = false;
+    const validEdge = Number.isFinite(edge) && Math.abs(edge) <= 50;
+    if (hasOdds && validEdge && (rawBuckets.includes('EDGE') || (edge > 0 && prob >= 0.55))) {
+      isEdge = true;
+    } else if (hasOdds && validEdge && (rawBuckets.includes('SAFE') || prob >= 0.58)) {
+      isSafe = true;
+    } else {
+      isAvoid = true;
+    }
+
+    const mktNorm = normalizeMarketKey(r.Market);
+    const sideUpper = ((r.Side || 'OVER').toUpperCase() === 'UNDER' ? 'UNDER' : 'OVER') as 'OVER' | 'UNDER';
+    const player = (r.Player || '').trim();
+    const team = (r.Team || '').trim();
+    const opp = (r.Opponent || '').trim();
+
+    const play: GradedPickerPlay = {
+      id: `seed:${sport}:${date}:${rowIdx}:${normalizePlayerName(player)}:${mktNorm}`,
+      player,
+      team,
+      opp,
+      matchup: (r.Matchup || `${team} vs ${opp}`).trim(),
+      market: mktNorm,
+      marketLabel: mktNorm === 'shots' ? 'Shots on Goal' : mktNorm === 'pts' || mktNorm === 'points' ? 'Points' : r.Market,
+      side: sideUpper,
+      line,
+      odds,
+      prob,
+      edge,
+      modelMu,
+      isEdge,
+      isSafe,
+      isAvoid,
+      isPotd: false,
+      result,
+      actual
+    };
+
+    const k = `${sport}_${date}`;
+    const entry = byBucketKey.get(k) || { sport, date, plays: [] };
+    entry.plays.push(play);
+    byBucketKey.set(k, entry);
+  }
+
+  let importedDates = 0;
+  let importedPlays = 0;
+  let skippedDates = 0;
+
+  for (const { sport, date, plays } of byBucketKey.values()) {
+    // Select single highest-EV priced non-avoid play on that date for POTD crown
+    let bestEv = 0;
+    let bestIdx = -1;
+    for (let i = 0; i < plays.length; i++) {
+      const p = plays[i];
+      if (p.odds == null || p.isAvoid) continue;
+      if (Math.abs(p.edge) > 50) continue;
+      const ev = p.prob * americanToDecimal(p.odds) - 1;
+      if (ev > bestEv) {
+        bestEv = ev;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx >= 0) {
+      plays[bestIdx].isPotd = true;
+    }
+
+    const existing = getDailyPickerSnapshot(sport, date);
+    if (existing && existing.plays.length > 0 && !options?.force) {
+      skippedDates++;
+      continue;
+    }
+
+    const snap: DailyPickerSnapshot = {
+      sport,
+      date,
+      timestamp: Date.parse(`${date}T23:59:00Z`) || Date.now(),
+      safeThreshold: 0.58,
+      seeded: true,
+      plays
+    };
+
+    setItem(`${PICKER_PREFIX}${sport}_${date}`, JSON.stringify(snap));
+    const dates = getStoredDates(sport);
+    if (!dates.includes(date)) {
+      dates.push(date);
+      saveStoredDates(sport, dates);
+    }
+    importedDates++;
+    importedPlays += plays.length;
+  }
+
+  if (importedDates > 0) {
+    setItem(SEED_DONE_KEY, '1');
+  }
+
+  return { importedDates, importedPlays, skippedDates };
+}
+
+export function loadPickerSeedSync(): { importedDates: number; importedPlays: number; skippedDates: number } {
+  if (typeof window !== 'undefined') return { importedDates: 0, importedPlays: 0, skippedDates: 0 };
+  try {
+    if (typeof process !== 'undefined' && process.versions?.node) {
+      let fs: any = null;
+      let path: any = null;
+      if (typeof (process as any).getBuiltinModule === 'function') {
+        fs = (process as any).getBuiltinModule('fs');
+        path = (process as any).getBuiltinModule('path');
+      } else {
+        const req = (eval)('require');
+        fs = req('fs');
+        path = req('path');
+      }
+      if (!fs || !path) return { importedDates: 0, importedPlays: 0, skippedDates: 0 };
+
+      const readCsv = (name: string): string | null => {
+        for (const dir of ['public/data', 'public/fixtures', 'public/assets/aistudio']) {
+          const p = path.resolve(process.cwd(), dir, name);
+          try { if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8'); } catch { /* ignore */ }
+        }
+        return null;
+      };
+      const full = readCsv('gatekeep_picker_seed_full_clean.csv');
+      if (!full) return { importedDates: 0, importedPlays: 0, skippedDates: 0 };
+      const gbg = readCsv('gatekeep_picker_seed_game_by_game_clean.csv') || undefined;
+      return seedPickerHistoryFromCsv(full, gbg);
+    }
+  } catch { /* ignore */ }
+  return { importedDates: 0, importedPlays: 0, skippedDates: 0 };
+}
+
+export async function loadPickerSeedClient(): Promise<number> {
+  if (typeof window === 'undefined') return 0;
+  if (seedClientPromise) return seedClientPromise;
+
+  seedClientPromise = (async () => {
+    try {
+      const [fullRes, gbgRes] = await Promise.all([
+        fetch('/data/gatekeep_picker_seed_full_clean.csv').catch(() => null),
+        fetch('/data/gatekeep_picker_seed_game_by_game_clean.csv').catch(() => null)
+      ]);
+      if (!fullRes?.ok) return 0;
+      const fullCsv = await fullRes.text();
+      const gbgCsv = gbgRes?.ok ? await gbgRes.text() : undefined;
+      // Always pass through idempotent seeder (fills missing dates, never overwrites user snapshots)
+      const res = seedPickerHistoryFromCsv(fullCsv, gbgCsv);
+      if (res.importedPlays > 0 || gbgCsv) {
+        window.dispatchEvent(new CustomEvent('gatekeep_picker_graded', { detail: { source: 'seed', ...res } }));
+      }
+      return res.importedPlays;
+    } catch (err) {
+      console.warn('[picker_grading] Seed CSV load skipped:', err);
+      return 0;
+    }
+  })();
+
+  return seedClientPromise;
+}
+
 /**
  * Grades all pending picker plays across stored snapshots against official card rows.
  * Matches by player name, date, and market, and grades the play's own line against the recorded actual stat.
@@ -242,12 +637,11 @@ export function gradePickerWithCardRows(sport: string, cardRows: CardRow[]): num
 
     let modified = false;
     for (const play of snap.plays) {
-      if (play.result !== null) continue; // Already graded
+      if (play.result !== null) continue;
 
       const pName = normalizePlayerName(play.player);
       const pMkt = normalizeMarketKey(play.market);
 
-      // Find matching card row by player name and market
       const match = cardRows.find(r => {
         if (r.date !== snap.date) return false;
         if (normalizePlayerName(r.name) !== pName) return false;
@@ -315,14 +709,13 @@ export function gradeNbaPickerWithBoxLines(
       const pName = normalizePlayerName(play.player);
       const pMkt = normalizeMarketKey(play.market);
 
-      // Find player line in dateLines
       const match = dateLines.find(l => {
         if (l.name && normalizePlayerName(l.name) === pName) return true;
         if (l.playerId && playerNameMap) {
           const mappedName = playerNameMap instanceof Map ? playerNameMap.get(l.playerId) : playerNameMap[l.playerId];
           if (mappedName && normalizePlayerName(mappedName) === pName) return true;
         }
-        if (l.playerId && (String(play.id).startsWith(String(l.playerId)) || String(play.id).includes(`_${l.playerId}_`))) return true;
+        if (l.playerId && (String(play.id).startsWith(String(l.playerId)) || String(play.id).includes(`_${l.playerId}_`) || String(play.id).startsWith(`${l.playerId}:`))) return true;
         return false;
       });
 
@@ -331,9 +724,21 @@ export function gradeNbaPickerWithBoxLines(
           play.result = 'VOID';
           play.actual = 0;
         } else {
-          const statKey = pMkt === 'threes' ? 'tpm' : pMkt === 'rebounds' ? 'reb' : pMkt === 'assists' ? 'ast' : pMkt === 'points' ? 'pts' : pMkt;
+          const statKey =
+            pMkt === 'threes' ? 'tpm' :
+            pMkt === 'rebounds' ? 'reb' :
+            pMkt === 'assists' ? 'ast' :
+            pMkt === 'points' ? 'pts' :
+            pMkt === 'steals' ? 'stl' :
+            pMkt === 'blocks' ? 'blk' : pMkt;
           const actualMap = (match as any).actual || match;
-          const val = actualMap[statKey] ?? actualMap[pMkt];
+          const val = pMkt === 'pra'
+            ? (actualMap.pra !== undefined && Number.isFinite(actualMap.pra)
+                ? actualMap.pra
+                : (Number.isFinite(actualMap.pts) && Number.isFinite(actualMap.reb) && Number.isFinite(actualMap.ast)
+                    ? Number(actualMap.pts) + Number(actualMap.reb) + Number(actualMap.ast)
+                    : undefined))
+            : (actualMap[statKey] ?? actualMap[pMkt]);
           if (val !== undefined && Number.isFinite(val)) {
             play.actual = val;
             const playOver = play.side.toUpperCase() === 'OVER';
@@ -361,7 +766,7 @@ export function gradeNbaPickerWithBoxLines(
 }
 
 /**
- * Grades NHL picker plays directly from raw NHL API boxscore objects.
+ * Grades NHL picker plays directly from raw NHL API boxscore objects (supports both shots & points).
  */
 export function gradeNhlPickerWithRawBoxes(gamesMap: Record<string, any>, targetDate: string): number {
   if (!gamesMap || Object.keys(gamesMap).length === 0) return 0;
@@ -404,7 +809,8 @@ export function gradeNhlPickerWithRawBoxes(gamesMap: Record<string, any>, target
     const pName = normalizePlayerName(play.player);
     const mkt = normalizeMarketKey(play.market);
 
-    const match = finalPlayers.get(pName) || finalPlayers.get(String(play.id).split('_')[0]);
+    const pidToken = String(play.id).split(/[:_]/)[0];
+    const match = finalPlayers.get(pName) || finalPlayers.get(pidToken);
     if (!match) continue;
 
     if (match.toiSec === 0) {
@@ -457,11 +863,6 @@ export function getLastSweepMeta(): LastSweepMeta | null {
   return null;
 }
 
-/**
- * Shared overnight & morning-safe grading pipeline across all sports.
- * On any run after 05:00 local (or when force=true), force-sweeps the last 7 days so
- * prior slate dates (like yesterday's games) are settled and never left sitting Pending.
- */
 export async function sweepPendingPickerGrades(options?: { force?: boolean; manual?: boolean }): Promise<SweepResult> {
   const now = new Date();
   const currentHour = now.getHours();
@@ -537,12 +938,10 @@ export async function sweepPendingPickerGrades(options?: { force?: boolean; manu
     console.warn('[sweep] NHL error:', err);
   }
 
-  // 3. Dispatch sweep request for mounted desk controllers (e.g. CardBoard, scoreboards)
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('gatekeep_sweep_requested', { detail: { force, manual: options?.manual } }));
   }
 
-  // Save sweep metadata
   try {
     setItem('gatekeep_last_sweep_meta', JSON.stringify({
       at: Date.now(),
@@ -558,7 +957,6 @@ export async function sweepPendingPickerGrades(options?: { force?: boolean; manu
 
   return result;
 }
-
 
 function emptyBucket(): BucketStats {
   return { hits: 0, misses: 0, voids: 0, pending: 0, decided: 0, hitRate: null };
@@ -582,32 +980,37 @@ function finalizeBucket(b: BucketStats): void {
   b.hitRate = b.decided > 0 ? parseFloat(((b.hits / b.decided) * 100).toFixed(1)) : null;
 }
 
+function resolveTargetDates(dates: string[], scope: 'today' | '7d' | 'all', todayIso: string): string[] {
+  if (scope === 'today') return [todayIso];
+  if (scope === '7d') {
+    const baseMs = Date.parse(`${todayIso}T00:00:00Z`);
+    const cutoffStr = Number.isFinite(baseMs)
+      ? new Date(baseMs - 7 * 86400000).toISOString().slice(0, 10)
+      : new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const out = dates.filter(d => d >= cutoffStr);
+    if (!out.includes(todayIso)) out.push(todayIso);
+    return out;
+  }
+  return dates;
+}
+
 /**
- * Calculates summary performance metrics for Today's Plays picker.
+ * Calculates summary performance metrics for Today's Plays picker using strictly exclusive buckets.
  */
 export function getPickerPerformance(
   sport: string,
   scope: 'today' | '7d' | 'all',
-  todayIso: string
+  todayIso: string,
+  filterMarket: string = 'all'
 ): PickerPerformanceSummary {
   const dates = getStoredDates(sport);
-
-  let targetDates: string[] = [];
-  if (scope === 'today') {
-    targetDates = [todayIso];
-  } else if (scope === '7d') {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 7);
-    const cutoffStr = cutoff.toISOString().slice(0, 10);
-    targetDates = dates.filter(d => d >= cutoffStr);
-    if (!targetDates.includes(todayIso)) targetDates.push(todayIso);
-  } else {
-    targetDates = dates;
-  }
+  const targetDates = resolveTargetDates(dates, scope, todayIso);
+  const normFilterMkt = filterMarket !== 'all' ? normalizeMarketKey(filterMarket) : 'all';
 
   const edge = emptyBucket();
   const safe = emptyBucket();
   const avoid = emptyBucket();
+  const potd = emptyBucket();
   let defaultSafeThresh = 0.58;
 
   for (const d of targetDates) {
@@ -615,16 +1018,22 @@ export function getPickerPerformance(
     if (!snap) continue;
     if (snap.safeThreshold) defaultSafeThresh = snap.safeThreshold;
 
-    for (const p of snap.plays) {
+    for (const rawP of snap.plays) {
+      const p = ensureExclusivePlay(rawP);
+      if (normFilterMkt !== 'all' && normalizeMarketKey(p.market) !== normFilterMkt) continue;
+
       if (p.isEdge) addOutcome(edge, p.result);
-      if (p.isSafe) addOutcome(safe, p.result);
-      if (p.isAvoid) addOutcome(avoid, p.result);
+      else if (p.isSafe) addOutcome(safe, p.result);
+      else addOutcome(avoid, p.result);
+
+      if (p.isPotd) addOutcome(potd, p.result);
     }
   }
 
   finalizeBucket(edge);
   finalizeBucket(safe);
   finalizeBucket(avoid);
+  finalizeBucket(potd);
 
   const totalDecided = edge.decided + safe.decided;
   const totalPending = edge.pending + safe.pending + avoid.pending;
@@ -636,6 +1045,7 @@ export function getPickerPerformance(
     edge,
     safe,
     avoid,
+    potd,
     totalDecided,
     totalPending
   };
@@ -654,37 +1064,31 @@ export function getPickerPlaysForInspection(
   scope: 'today' | '7d' | 'all',
   todayIso: string,
   filterBucket: 'all' | 'edge' | 'safe' | 'avoid' = 'all',
-  filterResult: 'all' | 'HIT' | 'MISS' | 'PUSH' | 'VOID' | 'PENDING' = 'all'
+  filterResult: 'all' | 'HIT' | 'MISS' | 'PUSH' | 'VOID' | 'PENDING' = 'all',
+  filterMarket: string = 'all',
+  potdOnly: boolean = false
 ): InspectedPickerPlay[] {
   const sportsToScan = sport === 'all' ? ['nba', 'nhl', 'nfl', 'mlb'] : [sport];
   const out: InspectedPickerPlay[] = [];
+  const normFilterMkt = filterMarket !== 'all' ? normalizeMarketKey(filterMarket) : 'all';
 
   for (const sp of sportsToScan) {
     const dates = getStoredDates(sp);
-    let targetDates: string[] = [];
-    if (scope === 'today') {
-      targetDates = [todayIso];
-    } else if (scope === '7d') {
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - 7);
-      const cutoffStr = cutoff.toISOString().slice(0, 10);
-      targetDates = dates.filter(d => d >= cutoffStr);
-      if (!targetDates.includes(todayIso)) targetDates.push(todayIso);
-    } else {
-      targetDates = dates;
-    }
+    const targetDates = resolveTargetDates(dates, scope, todayIso);
 
     for (const d of targetDates) {
       const snap = getDailyPickerSnapshot(sp, d);
       if (!snap) continue;
 
-      for (const p of snap.plays) {
-        // Bucket filter
+      for (const rawP of snap.plays) {
+        const p = ensureExclusivePlay(rawP);
+        if (potdOnly && !p.isPotd) continue;
+        if (normFilterMkt !== 'all' && normalizeMarketKey(p.market) !== normFilterMkt) continue;
+
         if (filterBucket === 'edge' && !p.isEdge) continue;
         if (filterBucket === 'safe' && !p.isSafe) continue;
         if (filterBucket === 'avoid' && !p.isAvoid) continue;
 
-        // Result filter
         if (filterResult === 'HIT' && p.result !== 'HIT') continue;
         if (filterResult === 'MISS' && p.result !== 'MISS') continue;
         if (filterResult === 'PUSH' && p.result !== 'PUSH') continue;
@@ -700,10 +1104,12 @@ export function getPickerPlaysForInspection(
     }
   }
 
-  // Sort: most recent date first, then by Edge status, then prob descending
+  // Sort: most recent date first, POTD first within date, then Edge, then prob descending
   out.sort((a, b) => {
     if (a.date !== b.date) return b.date.localeCompare(a.date);
+    if (Boolean(a.isPotd) !== Boolean(b.isPotd)) return a.isPotd ? -1 : 1;
     if (a.isEdge !== b.isEdge) return a.isEdge ? -1 : 1;
+    if (a.isSafe !== b.isSafe) return a.isSafe ? -1 : 1;
     return b.prob - a.prob;
   });
 
@@ -715,15 +1121,17 @@ export function getPickerPlaysForInspection(
  */
 export function getAllSportsPickerPerformance(
   scope: 'today' | '7d' | 'all',
-  todayIso: string
+  todayIso: string,
+  filterMarket: string = 'all'
 ): PickerPerformanceSummary {
   const sports = ['nba', 'nhl', 'nfl', 'mlb'];
   const edge = emptyBucket();
   const safe = emptyBucket();
   const avoid = emptyBucket();
+  const potd = emptyBucket();
 
   for (const sp of sports) {
-    const perf = getPickerPerformance(sp, scope, todayIso);
+    const perf = getPickerPerformance(sp, scope, todayIso, filterMarket);
     edge.hits += perf.edge.hits;
     edge.misses += perf.edge.misses;
     edge.voids += perf.edge.voids;
@@ -741,11 +1149,20 @@ export function getAllSportsPickerPerformance(
     avoid.voids += perf.avoid.voids;
     avoid.pending += perf.avoid.pending;
     avoid.decided += perf.avoid.decided;
+
+    if (perf.potd) {
+      potd.hits += perf.potd.hits;
+      potd.misses += perf.potd.misses;
+      potd.voids += perf.potd.voids;
+      potd.pending += perf.potd.pending;
+      potd.decided += perf.potd.decided;
+    }
   }
 
   finalizeBucket(edge);
   finalizeBucket(safe);
   finalizeBucket(avoid);
+  finalizeBucket(potd);
 
   return {
     sport: 'all',
@@ -754,14 +1171,12 @@ export function getAllSportsPickerPerformance(
     edge,
     safe,
     avoid,
+    potd,
     totalDecided: edge.decided + safe.decided,
     totalPending: edge.pending + safe.pending + avoid.pending
   };
 }
 
-/**
- * Client-side browser download helper for CSV or JSON files.
- */
 export function downloadPickerExport(filename: string, content: string, mimeType: string = 'text/csv'): void {
   if (typeof window === 'undefined') return;
   const blob = new Blob([content], { type: `${mimeType};charset=utf-8;` });
@@ -777,7 +1192,7 @@ export function downloadPickerExport(filename: string, content: string, mimeType
 }
 
 /**
- * Generates full row-by-row dataset CSV of picker plays for auditing and record-keeping.
+ * Generates full row-by-row dataset CSV of picker plays (strict exclusive bucket + POTD flag).
  */
 export function exportPickerFullDatasetCsv(
   sport: string,
@@ -801,22 +1216,20 @@ export function exportPickerFullDatasetCsv(
     'Edge_pp',
     'Buckets',
     'Result',
-    'Actual_Stat'
+    'Actual_Stat',
+    'Is_POTD'
   ];
 
   const rows = plays.map(p => {
-    const buckets: string[] = [];
-    if (p.isEdge) buckets.push('EDGE');
-    if (p.isSafe) buckets.push('SAFE');
-    if (p.isAvoid) buckets.push('AVOID');
-    const bStr = buckets.length ? buckets.join('+') : 'ALL';
-    const matchup = `${p.team || ''} vs ${p.opp || ''}`.trim();
+    const bStr = p.isEdge ? 'EDGE' : p.isSafe ? 'SAFE' : 'AVOID';
+    const matchup = p.matchup || `${p.team || ''} vs ${p.opp || ''}`.trim();
     const resultStr = p.result === 'HIT' ? 'WON' : p.result === 'MISS' ? 'LOST' : p.result ?? 'PENDING';
     const oddsStr = p.odds != null ? (p.odds > 0 ? `+${p.odds}` : `${p.odds}`) : '';
     const probStr = (p.prob * 100).toFixed(1) + '%';
     const edgeStr = p.edge != null ? p.edge.toFixed(1) : '';
     const muStr = p.modelMu != null ? p.modelMu.toFixed(2) : '';
     const actStr = p.actual != null ? String(p.actual) : '';
+    const potdStr = p.isPotd ? 'POTD' : '';
 
     return [
       p.date,
@@ -834,7 +1247,8 @@ export function exportPickerFullDatasetCsv(
       edgeStr,
       bStr,
       resultStr,
-      actStr
+      actStr,
+      potdStr
     ].join(',');
   });
 
@@ -842,7 +1256,7 @@ export function exportPickerFullDatasetCsv(
 }
 
 /**
- * Generates game-by-game aggregated CSV of picker performance with win rate per game matchup.
+ * Generates game-by-game aggregated CSV of picker performance with win rate per game matchup (exclusive buckets).
  */
 export function exportPickerGameByGameCsv(
   sport: string,
@@ -851,7 +1265,6 @@ export function exportPickerGameByGameCsv(
 ): string {
   const plays = getPickerPlaysForInspection(sport, scope, todayIso, 'all', 'all');
 
-  // Group by date + sport + matchup
   const gamesMap = new Map<string, {
     date: string;
     sport: string;
@@ -868,7 +1281,7 @@ export function exportPickerGameByGameCsv(
   }>();
 
   for (const p of plays) {
-    const matchup = `${p.team || 'UNK'} vs ${p.opp || 'UNK'}`;
+    const matchup = p.matchup || `${p.team || 'UNK'} vs ${p.opp || 'UNK'}`;
     const key = `${p.date}_${p.sport}_${matchup}`;
     if (!gamesMap.has(key)) {
       gamesMap.set(key, {
@@ -890,7 +1303,7 @@ export function exportPickerGameByGameCsv(
     const g = gamesMap.get(key)!;
     g.totalPlays++;
     if (p.isEdge) g.edgePlays++;
-    if (p.isSafe) g.safePlays++;
+    else if (p.isSafe) g.safePlays++;
     if (p.result === 'HIT') { g.hits++; g.decided++; }
     else if (p.result === 'MISS') { g.misses++; g.decided++; }
     else if (p.result === 'PUSH') { g.pushes++; }
@@ -936,5 +1349,3 @@ export function exportPickerGameByGameCsv(
 
   return [headers.join(','), ...rows].join('\n');
 }
-
-

@@ -11,6 +11,7 @@ import { CardRow } from '../../lib/card_core';
 import { NhlPlayerSnapshot, NhlSkaterProjection } from '../../types/nhl';
 import { normalizeName } from '../../lib/trend_analysis';
 import { NhlSlateShotsChart } from './NhlSlateShotsChart';
+import { PickerHistoryPanel } from '../common/PickerHistoryPanel';
 
 interface Props {
   rows: NhlLedgerRow[];
@@ -212,6 +213,7 @@ export const NhlScoreboard: React.FC<Props> = ({
 
   return (
     <div className="space-y-4">
+      <PickerHistoryPanel sport="nhl" sportLabel="NHL" />
       <TrendAnalysisSection
         sportLabel="NHL"
         currentCard={currentCardPlayers}

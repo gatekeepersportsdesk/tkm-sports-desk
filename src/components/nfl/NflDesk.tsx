@@ -12,6 +12,8 @@ import { TodaysPlaysSection, DeskPlayItem } from '../common/TodaysPlaysSection';
 import { CardRow } from '../../lib/card_core';
 import { parseOdds, calculateEdgePp, calculateEv } from '../../lib/odds';
 import { computePlayerCardForm, isFormFightingLean } from '../../lib/player_card_form';
+import { computeProcessScore, formSampleFromLogs, isWeakL10Form, DESK_SORT_LABELS, DeskSortOption } from '../../lib/desk_rank';
+import { isMatchingPotd } from '../../lib/picker_grading';
 
 interface NflDeskProps {
   snapshots: NflPropSnapshot[];
@@ -66,7 +68,8 @@ export const NflDesk: React.FC<NflDeskProps> = ({
 
   const [selectedDay, setSelectedDay] = useState<string>('ALL');
   const [filterMode, setFilterMode] = useState<'ALL' | 'PLAY' | 'PASS'>('ALL');
-  const [sortOrder, setSortOrder] = useState<'edge' | 'pct_desc' | 'pct_asc' | 'combined'>('edge');
+  const [sortOrder, setSortOrder] = useState<'edge' | 'pct_desc' | 'pct_asc' | 'combined' | 'form' | 'process'>('edge');
+  const [deprioritizeWeakForm, setDeprioritizeWeakForm] = useState<boolean>(false);
   const [highVarianceOnly, setHighVarianceOnly] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
 
@@ -94,7 +97,7 @@ export const NflDesk: React.FC<NflDeskProps> = ({
       const evVal = calculateEv(prob, oddsVal);
       if (edgePp === null) continue; // Disqualify impossible / invalid edge
 
-      const rawLogs = [Math.round(s.seasonAvg * 1.1), Math.round(s.seasonAvg * 0.9), Math.round(s.seasonAvg)];
+      const rawLogs: number[] = Array.isArray((s as any).recentReceptions) ? (s as any).recentReceptions : [];
       const cardForm = computePlayerCardForm(
         rawLogs,
         s.line,
@@ -112,6 +115,7 @@ export const NflDesk: React.FC<NflDeskProps> = ({
         team: s.team,
         opp: s.gameKey || '',
         market: 'receptions',
+        marketLabel: 'Receptions',
         side,
         line: s.line,
         odds: oddsVal,
@@ -122,11 +126,12 @@ export const NflDesk: React.FC<NflDeskProps> = ({
         modelMu: s.mu,
         unit: 'rec',
         form: cardForm,
-        formWarning
+        formWarning,
+        isPotd: isMatchingPotd({ player: s.player, market: 'receptions', side, line: s.line }, pickOfTheDay)
       });
     }
     return list;
-  }, [currentSnapshots]);
+  }, [currentSnapshots, pickOfTheDay]);
 
   const handleUpdateLine = (game: NflGameContext, playerName: string, line: number, overOdds: string, underOdds: string) => {
     // Resolve the receiver from the roster the row came from (never guess a team).
@@ -284,7 +289,7 @@ export const NflDesk: React.FC<NflDeskProps> = ({
           </div>
 
           {/* Desk Sort Controls */}
-          <div className="flex items-center gap-1 bg-[#0f1520] p-1 rounded-xl border border-[#222d3e]">
+          <div className="flex items-center gap-1 bg-[#0f1520] p-1 rounded-xl border border-[#222d3e] flex-wrap">
             <span className="text-[10px] font-mono text-[#8b97ac] px-1.5 uppercase font-bold">Sort:</span>
             <button
               onClick={() => setSortOrder('edge')}
@@ -292,7 +297,7 @@ export const NflDesk: React.FC<NflDeskProps> = ({
                 sortOrder === 'edge' ? 'bg-sky-500 text-slate-950 font-bold' : 'text-[#8b97ac] hover:text-white'
               }`}
             >
-              Edge (default)
+              Edge
             </button>
             <button
               onClick={() => setSortOrder('pct_desc')}
@@ -311,6 +316,40 @@ export const NflDesk: React.FC<NflDeskProps> = ({
             >
               Combined
             </button>
+            <button
+              onClick={() => setSortOrder('form')}
+              className={`px-2.5 py-1 text-xs font-mono font-semibold rounded-lg transition cursor-pointer ${
+                sortOrder === 'form' ? 'bg-sky-500 text-slate-950 font-bold' : 'text-[#8b97ac] hover:text-white'
+              }`}
+            >
+              Form (L10/L5)
+            </button>
+            <button
+              onClick={() => setSortOrder('process')}
+              className={`px-2.5 py-1 text-xs font-mono font-semibold rounded-lg transition cursor-pointer ${
+                sortOrder === 'process' ? 'bg-sky-500 text-slate-950 font-bold' : 'text-[#8b97ac] hover:text-white'
+              }`}
+            >
+              Process
+            </button>
+            <button
+              onClick={() => setDeprioritizeWeakForm(v => !v)}
+              className={`px-2 py-1 text-[11px] font-mono rounded-lg border transition cursor-pointer ${
+                deprioritizeWeakForm
+                  ? 'bg-amber-950/80 text-amber-300 border-amber-500/70 font-bold'
+                  : 'bg-[#121824] text-[#8b97ac] border-[#222d3e] hover:text-white'
+              }`}
+              title="Push rows with L10 hit rate below 40% below stronger-form rows when form logs exist"
+            >
+              L10 &lt;40% ↓
+            </button>
+            <span className="text-[10px] font-mono text-sky-300 px-1.5">
+              Active: <strong>{
+                sortOrder === 'pct_desc' ? DESK_SORT_LABELS.prob
+                  : sortOrder === 'pct_asc' ? 'Model Prob (Asc)'
+                  : DESK_SORT_LABELS[sortOrder as DeskSortOption]
+              }</strong>
+            </span>
           </div>
 
           <button
@@ -336,6 +375,7 @@ export const NflDesk: React.FC<NflDeskProps> = ({
         sportLabel="NFL"
         sportKey="nfl"
         plays={todaysPlays}
+        pickOfTheDay={pickOfTheDay}
         date={new Date().toISOString().slice(0, 10)}
         cardRows={cardRows}
         onAddToTicket={onAddToTicket}
@@ -393,11 +433,31 @@ export const NflDesk: React.FC<NflDeskProps> = ({
                 return matchPlayer || matchTeam || matchOpp;
               });
             }
-            if (sortOrder === 'edge') return [...list].sort((a, b) => (b.hasMarket ? b.edge : -999) - (a.hasMarket ? a.edge : -999));
-            if (sortOrder === 'pct_desc') return [...list].sort((a, b) => winPctOf(b) - winPctOf(a));
-            if (sortOrder === 'pct_asc') return [...list].sort((a, b) => winPctOf(a) - winPctOf(b));
-            if (sortOrder === 'combined') return [...list].sort((a, b) => ((b.hasMarket ? b.edge : 0) * winPctOf(b)) - ((a.hasMarket ? a.edge : 0) * winPctOf(a)));
-            return list;
+            const formFor = (s: NflPropSnapshot) => {
+              const logs: number[] = Array.isArray((s as any).recentReceptions) ? (s as any).recentReceptions : [];
+              return formSampleFromLogs(logs, s.line, s.lean);
+            };
+            const sortKeyFor = (s: NflPropSnapshot) => {
+              const form = formFor(s);
+              const priced = s.hasMarket !== false;
+              const edgePp = priced ? s.edge * 100 : -999;
+              const prob = winPctOf(s);
+              let key = 0;
+              if (sortOrder === 'edge') key = priced ? edgePp : -999;
+              else if (sortOrder === 'pct_desc') key = prob;
+              else if (sortOrder === 'pct_asc') key = -prob;
+              else if (sortOrder === 'combined') key = (priced ? edgePp : 0) * prob;
+              else if (sortOrder === 'form') {
+                const l10 = form?.l10HitRate ?? null;
+                const l5 = form?.l5HitRate ?? null;
+                key = l10 === null && l5 === null ? -1 : (l10 ?? l5 ?? 0) * 1000 + (l5 ?? 0) * 10 + (priced ? 1 : 0);
+              } else if (sortOrder === 'process') {
+                key = computeProcessScore(prob, edgePp, priced, form);
+              }
+              if (deprioritizeWeakForm && isWeakL10Form(form)) key -= 10000;
+              return key;
+            };
+            return [...list].sort((a, b) => sortKeyFor(b) - sortKeyFor(a) || winPctOf(b) - winPctOf(a));
           };
 
           const displayedGames = searchQuery.trim()
@@ -480,6 +540,7 @@ export const NflDesk: React.FC<NflDeskProps> = ({
                           key={snap.id}
                           snapshot={snap}
                           isBetPlaced={Boolean(bets[snap.id])}
+                          isPotd={pickOfTheDay != null && pickOfTheDay.player === snap.player && Math.abs(pickOfTheDay.line - snap.line) < 1e-6}
                           onRecordBet={onRecordBet}
                           onUpdateLine={(pName, l, ov, un) => handleUpdateLine(game, pName, l, ov, un)}
                           teammates={awaySnaps}
@@ -505,6 +566,7 @@ export const NflDesk: React.FC<NflDeskProps> = ({
                           key={snap.id}
                           snapshot={snap}
                           isBetPlaced={Boolean(bets[snap.id])}
+                          isPotd={pickOfTheDay != null && pickOfTheDay.player === snap.player && Math.abs(pickOfTheDay.line - snap.line) < 1e-6}
                           onRecordBet={onRecordBet}
                           onUpdateLine={(pName, l, ov, un) => handleUpdateLine(game, pName, l, ov, un)}
                           teammates={homeSnaps}

@@ -64,3 +64,16 @@ test('Player Card Form: isFormFightingLean correctly flags opposing form', () =>
   assert.strictEqual(isFormFightingLean(undefined, 'OVER', 2.5), false);
 });
 
+test('Player Card Form: Missing logs return null hitRatePct and hasForm=false (never 0%)', () => {
+  const missing = computePlayerCardForm(undefined, 2.5, 'OVER');
+  assert.strictEqual(missing.hasForm, false);
+  assert.strictEqual(missing.l5.games, 0);
+  assert.strictEqual(missing.l5.hitRatePct, null);
+  assert.strictEqual(missing.l5.avgStat, null);
+  assert.strictEqual(missing.l10.games, 0);
+  assert.strictEqual(missing.l10.hitRatePct, null);
+  assert.strictEqual(missing.l10.avgStat, null);
+  assert.ok(!missing.whyThisLean.includes('0%'));
+});
+
+

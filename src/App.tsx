@@ -59,7 +59,7 @@ import { captureNflCard, gradeNflCard, nflEdgeKeys, nflPendingWeeks, summarizeNf
 import { captureMlbCard, gradeMlbCard, mlbEdgeKeys, mlbNotStarted, summarizeMlbCard, MlbPrediction, MLB_MARKET_LABEL } from './lib/mlb_card';
 import { ParlayLab } from './components/common/ParlayLab';
 import { recordOddsImport } from './lib/pick_of_the_day';
-import { getStoredDates, getDailyPickerSnapshot, gradePickerWithCardRows, gradeNbaPickerWithBoxLines, sweepPendingPickerGrades } from './lib/picker_grading';
+import { getStoredDates, getDailyPickerSnapshot, gradePickerWithCardRows, gradeNbaPickerWithBoxLines, sweepPendingPickerGrades, loadPickerSeedClient } from './lib/picker_grading';
 import { BettableSettings } from './components/common/BettableSettings';
 import { DisplaySettingsProvider } from './components/common/DisplaySettingsContext';
 import { loadDisplayConfig } from './lib/display_settings';
@@ -78,6 +78,8 @@ import { MyBetsTab } from './components/common/MyBetsTab';
 import { LogBetModal } from './components/common/LogBetModal';
 import { persistWithAutoArchive, clearOldGradedHistory } from './lib/storage_archive';
 import { loadPlayerPriorsClient } from './lib/player_priors';
+import { loadNhlContextPriorsClient } from './lib/nhl_context_priors';
+import { loadNhl2026PriorsClient, enrichNhlSkaterWith2026Priors } from './lib/nhl_2026_priors';
 
 export default function App() {
   // The selected sport / tab survive reloads, hot reloads and remounts (they used to reset to NFL).
@@ -103,9 +105,15 @@ export default function App() {
     try { localStorage.setItem(NAV_KEY, JSON.stringify({ sport: activeSport, tab: activeSubTab })); } catch { /* ignore */ }
   }, [activeSport, activeSubTab]);
 
-  // Load external player rate priors (NFL & NBA) asynchronously for client use
+  const [priorsVersion, setPriorsVersion] = useState(0);
+
+  // Load external player rate priors (NFL, NBA, NHL 2026) and picker seed history on mount
   useEffect(() => {
     loadPlayerPriorsClient();
+    Promise.all([loadNhlContextPriorsClient(), loadNhl2026PriorsClient()])
+      .then(() => setPriorsVersion(v => v + 1))
+      .catch(() => {});
+    loadPickerSeedClient();
   }, []);
 
   // Personal Bet Log state (separate from automated daily cards)
@@ -686,13 +694,13 @@ export default function App() {
       const withExtras = (team: string) => {
         const base = nhlSkatersByTeam[team] || [];
         const extras = nhlExtraSkaters.filter(x => x.team === team && !base.some(b => fuzzyMatchName(b.name, x.name)));
-        return applyInjuries([...base, ...extras], nhlInjuries);
+        return applyInjuries([...base, ...extras], nhlInjuries).map(enrichNhlSkaterWith2026Priors);
       };
       withExtras(away).forEach(p => list.push({ ...projectNhlSkater(p, home, nhlFactors ?? undefined), gameId: g.gameId }));
       withExtras(home).forEach(p => list.push({ ...projectNhlSkater(p, away, nhlFactors ?? undefined), gameId: g.gameId }));
     });
     return list;
-  }, [nhlLiveGames, nhlSkatersByTeam, nhlExtraSkaters, nhlInjuries, nhlFactors, nhlTuning]);
+  }, [nhlLiveGames, nhlSkatersByTeam, nhlExtraSkaters, nhlInjuries, nhlFactors, nhlTuning, priorsVersion]);
 
   const handleNhlOddsChange = (market: NhlMarket, playerId: number, line: number, side: 'over' | 'under', val: number | null) => {
     setNhlOdds(prev => {

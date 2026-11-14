@@ -12,6 +12,7 @@ import { TodaysPlaysSection, DeskPlayItem } from '../common/TodaysPlaysSection';
 import { CardRow } from '../../lib/card_core';
 import { calculateEdgePp, calculateEv, parseOdds } from '../../lib/odds';
 import { computePlayerCardForm, isFormFightingLean } from '../../lib/player_card_form';
+import { isMatchingPotd } from '../../lib/picker_grading';
 
 interface MlbDeskProps {
   games: MlbGameMatchup[];
@@ -111,9 +112,7 @@ export const MlbDesk: React.FC<MlbDeskProps> = ({
 
       const line = r.price.line ?? 0.5;
       const modelMu = r.hit.raw ?? (r.hit.ba * (r.hit.ab || 4));
-      const rawLogs = (r.batter.recentBa != null && r.batter.recentAb && r.batter.recentAb >= 10)
-        ? [Math.round(r.batter.recentBa * 4), Math.round(r.batter.recentBa * 4), Math.round(r.batter.recentBa * 3), Math.round(r.batter.recentBa * 5), Math.round(r.batter.recentBa * 4)]
-        : [];
+      const rawLogs: number[] = Array.isArray((r.batter as any).recentHits) ? (r.batter as any).recentHits : [];
       const cardForm = computePlayerCardForm(
         rawLogs,
         line,
@@ -131,6 +130,7 @@ export const MlbDesk: React.FC<MlbDeskProps> = ({
         team: r.batter.team,
         opp: r.game.away === r.batter.team ? r.game.home : r.game.away,
         market: 'hits',
+        marketLabel: '0.5 Hits',
         side,
         line,
         odds: oddsVal,
@@ -141,11 +141,12 @@ export const MlbDesk: React.FC<MlbDeskProps> = ({
         modelMu,
         unit: 'hits',
         form: cardForm,
-        formWarning
+        formWarning,
+        isPotd: isMatchingPotd({ player: r.batter.name, market: 'hits', side, line }, pickOfTheDay)
       });
     }
     return list;
-  }, [allRows]);
+  }, [allRows, pickOfTheDay]);
 
   const pricedSig = allRows
     .filter(r => Boolean(r.price.over) && Boolean(r.price.under))
@@ -266,6 +267,7 @@ export const MlbDesk: React.FC<MlbDeskProps> = ({
         sportLabel="MLB"
         sportKey="mlb"
         plays={todaysPlays}
+        pickOfTheDay={pickOfTheDay}
         date={new Date().toISOString().slice(0, 10)}
         cardRows={cardRows}
         onAddToTicket={onAddToTicket}
@@ -376,6 +378,7 @@ export const MlbDesk: React.FC<MlbDeskProps> = ({
                       key={row.batter.id}
                       row={row}
                       inParlay={parlayLegs.includes(row.batter.id)}
+                      isPotd={pickOfTheDay != null && pickOfTheDay.player === row.batter.name && Math.abs(pickOfTheDay.line - (row.price.line ?? 0.5)) < 1e-6}
                       onToggleParlay={() => onToggleParlay(row.batter, row.gate, row.price)}
                       onOpenSheet={() => setSelectedSheetRow(row)}
                       onOddsChange={(side, val) => onUpdateOdds(row.batter.id, side, val)}

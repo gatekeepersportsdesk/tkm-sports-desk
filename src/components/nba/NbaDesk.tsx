@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { NbaMarket, NBA_MARKETS, NbaOddsEntry, NbaPlayerProjection, NbaSettings, nbaOddsKey, NBA_MARKET_UNIT } from '../../types/nba';
+import { NbaMarket, NBA_MARKETS, NbaOddsEntry, NbaPlayerProjection, NbaSettings, nbaOddsKey, NBA_MARKET_UNIT, NBA_MARKET_LABEL } from '../../types/nba';
 import { NbaMatchup, NbaOddsMap, evalNbaRow } from '../../lib/nba_board';
 import { NbaPlayerRow } from './NbaPlayerRow';
 import { Calendar, Search, X, Zap, ChevronDown, ChevronLeft, ChevronRight, RotateCw } from 'lucide-react';
-import { BettableConfig } from '../../lib/bettable';
-import { rankDeskRows, DeskSortOption } from '../../lib/desk_rank';
+import { BettableConfig, bestLine } from '../../lib/bettable';
+import { rankDeskRows, DeskSortOption, DESK_SORT_LABELS, formSampleFromLogs } from '../../lib/desk_rank';
 import { getNbaMarketVariance, MarketVarianceInfo } from '../../lib/market_variance';
 import { getNbaPickOfTheDay } from '../../lib/pick_of_the_day';
 import { PickOfTheDayCard } from '../common/PickOfTheDayCard';
@@ -12,6 +12,7 @@ import { TodaysPlaysSection, DeskPlayItem } from '../common/TodaysPlaysSection';
 import { CardRow } from '../../lib/card_core';
 import { calculateEdgePp, calculateEv } from '../../lib/odds';
 import { computePlayerCardForm, isFormFightingLean } from '../../lib/player_card_form';
+import { isMatchingPotd } from '../../lib/picker_grading';
 
 interface Props {
   date: string;
@@ -54,6 +55,7 @@ export const NbaDesk: React.FC<Props> = ({
   const [page, setPage] = useState<number>(1);
   const [showAllRows, setShowAllRows] = useState<boolean>(false);
   const [sortBy, setSortBy] = useState<DeskSortOption>('edge');
+  const [deprioritizeWeakForm, setDeprioritizeWeakForm] = useState<boolean>(false);
 
   useEffect(() => { setFullModel(!bet.bettableOnly); }, [bet.bettableOnly]);
 
@@ -74,7 +76,7 @@ export const NbaDesk: React.FC<Props> = ({
   // Compute rankings and memoize player line & tag lookups in O(1) Map
   const { ranked, playerEvalMap, qualifyingPlaysCount } = useMemo(() => {
     const rankedRows = rankDeskRows(projections, {
-      sport: 'nba', market, cfg: bet, sortBy,
+      sport: 'nba', market, cfg: bet, sortBy, deprioritizeWeakForm,
       linesOf: p => p.markets[market].lines, defaultLine: p => p.markets[market].defaultLine, picked: p => lines[`${market}:${p.playerId}`],
       entryAt: (p, l) => entryFor(market, p.playerId, l),
       evalAt: (p, l) => {
@@ -82,7 +84,11 @@ export const NbaDesk: React.FC<Props> = ({
         const d = r.decision;
         return { hasMarket: d.hasMarket, evOver: d.evOver, evUnder: d.evUnder, edgeOver: d.edgeOver, edgeUnder: d.edgeUnder, pOver: r.pOver, pUnder: r.pUnder };
       },
-      mu: p => p.markets[market].mu, pm: p => p.markets[market].pm, inputs: p => p.inputsSource, availability: p => p.availability
+      mu: p => p.markets[market].mu, pm: p => p.markets[market].pm, inputs: p => p.inputsSource, availability: p => p.availability,
+      formOf: (p, l, side) => {
+        if (!p.recentLogs || p.recentLogs.length === 0) return null;
+        return formSampleFromLogs(p.recentLogs.map(g => g.counts[market]).reverse(), l, side);
+      }
     });
 
     const pMap = new Map<number, { line: number; tag: string }>();
@@ -98,7 +104,7 @@ export const NbaDesk: React.FC<Props> = ({
     }
 
     return { ranked: rankedRows, playerEvalMap: pMap, qualifyingPlaysCount: plays };
-  }, [projections, market, bet, lines, oddsMap, settings, sortBy]);
+  }, [projections, market, bet, lines, oddsMap, settings, sortBy, deprioritizeWeakForm]);
 
   const lineFor = (p: NbaPlayerProjection) => playerEvalMap.get(p.playerId)?.line ?? p.markets[market].defaultLine;
   const tagOf = (p: NbaPlayerProjection) => playerEvalMap.get(p.playerId)?.tag ?? 'PASS';
@@ -123,64 +129,88 @@ export const NbaDesk: React.FC<Props> = ({
     return getNbaPickOfTheDay(projections, oddsMap, settings, bet, date);
   }, [projections, oddsMap, settings, bet, date]);
 
-  // Today's Plays for the desk and parlay groups
+  // Multi-Market Today's Plays across all priced NBA markets (pts, ast, reb, pra, tpm, stl, blk)
   const todaysPlays: DeskPlayItem[] = useMemo(() => {
     const list: DeskPlayItem[] = [];
-    for (const r of ranked) {
-      if (!r.priced) continue;
-      const line = r.line;
-      const entry = entryFor(market, r.p.playerId, line);
-      const ev = evalNbaRow(r.p, market, line, entry, settings);
-      const d = ev.decision;
-      const side: 'OVER' | 'UNDER' = d.tag === 'FADE' ? 'UNDER' : 'OVER';
-      const postedOdds = side === 'UNDER' ? entry?.under : entry?.over;
-      if (postedOdds == null) continue; // Require posted price on chosen side
-      const prob = side === 'UNDER' ? ev.pUnder : ev.pOver;
-      const edgePp = calculateEdgePp(prob, postedOdds);
-      const evVal = calculateEv(prob, postedOdds);
-      if (edgePp === null) continue; // Disqualify impossible / invalid edge
+    const seen = new Set<string>();
 
-      const mp = r.p.markets[market];
-      const unit = NBA_MARKET_UNIT[market] || market;
-      const recentStatLogs = (r.p.recentLogs && r.p.recentLogs.length > 0)
-        ? r.p.recentLogs.map(l => l.counts[market]).reverse()
-        : (r.p.recentMinutes || []).map(m => Math.round(m * mp.rate * 10) / 10).reverse();
-      const seasonMinAvg = r.p.pm;
-      const cardForm = computePlayerCardForm(
-        recentStatLogs,
-        line,
-        side,
-        {
-          oppFactor: mp.oppFactor,
+    for (const m of NBA_MARKETS) {
+      for (const p of projections) {
+        const mp = p.markets[m];
+        if (!mp) continue;
+
+        const pricedLines = mp.lines.filter(l => {
+          const e = entryFor(m, p.playerId, l);
+          return !!e && (e.over != null || e.under != null);
+        });
+        if (pricedLines.length === 0) continue;
+
+        const evalFn = (l: number) => {
+          const r = evalNbaRow(p, m, l, entryFor(m, p.playerId, l), settings);
+          const d = r.decision;
+          return { hasMarket: d.hasMarket, evOver: d.evOver, evUnder: d.evUnder, edgeOver: d.edgeOver, edgeUnder: d.edgeUnder, pOver: r.pOver, pUnder: r.pUnder };
+        };
+        const best = bestLine(pricedLines, evalFn);
+        const pickedLine = lines[`${m}:${p.playerId}`];
+        const line = pickedLine ?? best?.line ?? pricedLines[0];
+        const entry = entryFor(m, p.playerId, line);
+        const ev = evalNbaRow(p, m, line, entry, settings);
+        const d = ev.decision;
+        const side: 'OVER' | 'UNDER' = d.tag === 'FADE' ? 'UNDER' : 'OVER';
+        const postedOdds = side === 'UNDER' ? entry?.under : entry?.over;
+        if (postedOdds == null) continue;
+        const prob = side === 'UNDER' ? ev.pUnder : ev.pOver;
+        const edgePp = calculateEdgePp(prob, postedOdds);
+        const evVal = calculateEv(prob, postedOdds);
+        if (edgePp === null) continue;
+
+        const playId = `${p.playerId}:${m}:${line}`;
+        if (seen.has(playId)) continue;
+        seen.add(playId);
+
+        const unit = NBA_MARKET_UNIT[m] || m;
+        // Real logs only — never fabricate logs from minutes * rate
+        const recentStatLogs = (p.recentLogs && p.recentLogs.length > 0)
+          ? p.recentLogs.map(l => l.counts[m]).reverse()
+          : [];
+        const cardForm = computePlayerCardForm(
+          recentStatLogs,
+          line,
+          side,
+          {
+            oppFactor: mp.oppFactor,
+            edge: edgePp,
+            seasonMinAvg: p.pm,
+            recentMinutes: p.recentMinutes,
+            marketLabel: unit
+          }
+        );
+        const formWarning = isFormFightingLean(cardForm, side, line);
+
+        list.push({
+          id: playId,
+          player: p.name,
+          team: p.team,
+          opp: p.opp,
+          market: m,
+          marketLabel: NBA_MARKET_LABEL[m] || unit,
+          side,
+          line,
+          odds: postedOdds,
+          prob,
           edge: edgePp,
-          seasonMinAvg,
-          recentMinutes: r.p.recentMinutes,
-          marketLabel: unit
-        }
-      );
-      const formWarning = isFormFightingLean(cardForm, side, line);
-
-      list.push({
-        id: `${r.p.playerId}:${market}:${line}`,
-        player: r.p.name,
-        team: r.p.team,
-        opp: r.p.opp,
-        market,
-        side,
-        line,
-        odds: postedOdds,
-        prob,
-        edge: edgePp,
-        ev: evVal,
-        hasOdds: true,
-        modelMu: mp.mu,
-        unit,
-        form: cardForm,
-        formWarning
-      });
+          ev: evVal,
+          hasOdds: true,
+          modelMu: mp.mu,
+          unit,
+          form: cardForm,
+          formWarning,
+          isPotd: isMatchingPotd({ player: p.name, market: m, side, line }, pickOfTheDay)
+        });
+      }
     }
     return list;
-  }, [ranked, market, oddsMap, settings]);
+  }, [projections, lines, oddsMap, settings, pickOfTheDay]);
 
   // Filter rows based on game dropdown, search query, variance, etc.
   const visibleRows = useMemo(() => {
@@ -385,11 +415,12 @@ export const NbaDesk: React.FC<Props> = ({
       {/* Pick of the Day (NBA Props) */}
       <PickOfTheDayCard pick={pickOfTheDay} sportLabel="NBA Props" />
 
-      {/* Today's Plays */}
+      {/* Today's Plays (Multi-Market NBA Props) */}
       <TodaysPlaysSection
         sportLabel="NBA"
         sportKey="nba"
         plays={todaysPlays}
+        pickOfTheDay={pickOfTheDay}
         date={date}
         cardRows={cardRows}
         onAddToTicket={onAddToTicket}
@@ -416,32 +447,37 @@ export const NbaDesk: React.FC<Props> = ({
           </div>
 
           {/* Desk Sort Controls */}
-          <div className="flex items-center gap-1 bg-[#0f1520] p-1 rounded-xl border border-[#222d3e]">
+          <div className="flex items-center gap-1 bg-[#0f1520] p-1 rounded-xl border border-[#222d3e] flex-wrap">
             <span className="text-[10px] font-mono text-[#556277] uppercase px-1.5 font-bold">Sort:</span>
+            {(['edge', 'prob', 'combined', 'form', 'process'] as DeskSortOption[]).map(opt => (
+              <button
+                key={opt}
+                onClick={() => setSortBy(opt)}
+                className={`px-2.5 py-1 text-xs font-mono font-semibold rounded-lg transition cursor-pointer ${
+                  sortBy === opt ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-[#8b97ac] hover:text-white'
+                }`}
+              >
+                {opt === 'edge' ? 'Edge'
+                  : opt === 'prob' ? 'Model Prob'
+                  : opt === 'combined' ? 'Combined'
+                  : opt === 'form' ? 'Form (L10/L5)'
+                  : 'Process'}
+              </button>
+            ))}
             <button
-              onClick={() => setSortBy('edge')}
-              className={`px-2.5 py-1 text-xs font-mono font-semibold rounded-lg transition cursor-pointer ${
-                sortBy === 'edge' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-[#8b97ac] hover:text-white'
+              onClick={() => setDeprioritizeWeakForm(v => !v)}
+              className={`px-2 py-1 text-[11px] font-mono rounded-lg border transition cursor-pointer ${
+                deprioritizeWeakForm
+                  ? 'bg-amber-950/80 text-amber-300 border-amber-500/70 font-bold'
+                  : 'bg-[#121824] text-[#8b97ac] border-[#222d3e] hover:text-white'
               }`}
+              title="Push rows with L10 hit rate below 40% on the picked side below stronger-form rows"
             >
-              Edge (default)
+              L10 &lt;40% ↓
             </button>
-            <button
-              onClick={() => setSortBy('prob')}
-              className={`px-2.5 py-1 text-xs font-mono font-semibold rounded-lg transition cursor-pointer ${
-                sortBy === 'prob' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-[#8b97ac] hover:text-white'
-              }`}
-            >
-              Model Prob
-            </button>
-            <button
-              onClick={() => setSortBy('combined')}
-              className={`px-2.5 py-1 text-xs font-mono font-semibold rounded-lg transition cursor-pointer ${
-                sortBy === 'combined' ? 'bg-cyan-500 text-slate-950 font-bold' : 'text-[#8b97ac] hover:text-white'
-              }`}
-            >
-              Combined (Edge × Prob)
-            </button>
+            <span className="text-[10px] font-mono text-cyan-300 px-1.5" title="Active desk sort mode">
+              Active: <strong>{DESK_SORT_LABELS[sortBy]}</strong>
+            </span>
           </div>
         </div>
 
@@ -533,6 +569,7 @@ export const NbaDesk: React.FC<Props> = ({
                 entryFor={entryFor}
                 settings={settings}
                 selectedLine={lineFor(p)}
+                isPotd={pickOfTheDay != null && pickOfTheDay.market === market && pickOfTheDay.player === p.name && Math.abs(pickOfTheDay.line - lineFor(p)) < 1e-6}
                 onOddsChange={onOddsChange}
                 onSelectLine={(m, id, l) => setLines(prev => ({ ...prev, [`${m}:${id}`]: l }))}
                 variance={varianceMap.get(p.playerId)}

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { MlbBatterInput, MlbHitProjection, MlbGateResult } from '../../types/mlb';
+import { Crown } from 'lucide-react';
 
 interface MlbBatterCardProps {
   row: {
@@ -10,6 +11,7 @@ interface MlbBatterCardProps {
     price: { over: string; under: string; line?: number };
   };
   inParlay: boolean;
+  isPotd?: boolean;
   onToggleParlay: () => void;
   onOpenSheet: () => void;
   onOddsChange: (side: 'over' | 'under', val: string) => void;
@@ -20,6 +22,7 @@ interface MlbBatterCardProps {
 export const MlbBatterCard: React.FC<MlbBatterCardProps> = ({
   row,
   inParlay,
+  isPotd,
   onToggleParlay,
   onOpenSheet,
   onOddsChange,
@@ -36,9 +39,11 @@ export const MlbBatterCard: React.FC<MlbBatterCardProps> = ({
 
   const isPlay = gate.call === 'PLAY';
 
-  const trafficBorder = isPlay
-    ? 'border-emerald-500/80 bg-emerald-950/20 shadow-sm shadow-emerald-950/40'
-    : 'border-[#222d3e] bg-[#0f1520] hover:border-slate-600';
+  const trafficBorder = isPotd
+    ? 'border-amber-400/90 bg-amber-950/15 shadow-sm shadow-amber-950/40'
+    : isPlay
+      ? 'border-emerald-500/80 bg-emerald-950/20 shadow-sm shadow-emerald-950/40'
+      : 'border-[#222d3e] bg-[#0f1520] hover:border-slate-600';
 
   const badgeStyle = isPlay
     ? 'bg-emerald-950 text-emerald-300 border border-emerald-500 font-bold shadow-sm shadow-emerald-900/50'
@@ -52,6 +57,11 @@ export const MlbBatterCard: React.FC<MlbBatterCardProps> = ({
             onClick={onOpenSheet}
             className="text-left font-bold text-white hover:text-amber-400 transition flex items-center gap-1.5 text-sm sm:text-base font-sans cursor-pointer"
           >
+            {isPotd && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-400 text-slate-950" title="Pick of the Day">
+                <Crown className="w-3 h-3 fill-current" /> POTD
+              </span>
+            )}
             {batter.name}
           </button>
           <p className="text-[11px] text-[#8b97ac] font-mono">

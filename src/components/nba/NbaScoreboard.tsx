@@ -12,6 +12,7 @@ import { useDisplaySettings } from '../common/DisplaySettingsContext';
 import { TrendAnalysisSection } from '../common/TrendAnalysisSection';
 import { NbaPlayerSnapshot } from '../../types/nba';
 import { normalizeName } from '../../lib/trend_analysis';
+import { PickerHistoryPanel } from '../common/PickerHistoryPanel';
 
 interface Props {
   rows: NbaLedgerRow[];
@@ -142,6 +143,7 @@ export const NbaScoreboard: React.FC<Props> = ({
         </button>
         <span className="text-[11px] font-mono text-cyan-300">{gradeStatus}</span>
       </div>
+      <PickerHistoryPanel sport="nba" sportLabel="NBA" />
       <NbaCardBoard
         rows={predictions}
         edge={edge}

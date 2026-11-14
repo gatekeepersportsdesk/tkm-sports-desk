@@ -3,7 +3,7 @@ import { NhlSkaterProjection, NhlMarket, NhlOddsEntry, NhlSettings } from '../..
 import { evalNhlRow, marketOf } from '../../lib/nhl_board';
 import { parseAmericanOdds } from '../../model/nhl_engine';
 import { NhlPlayerDrawer } from './NhlPlayerDrawer';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp, Crown } from 'lucide-react';
 import { MarketVarianceInfo, getNhlMarketVariance } from '../../lib/market_variance';
 import { MarketVarianceBadge } from '../common/MarketVarianceBadge';
 import { computePlayerCardForm, getEdgeColorClass } from '../../lib/player_card_form';
@@ -16,6 +16,7 @@ interface Props {
   entryFor: (market: NhlMarket, playerId: number, line: number) => NhlOddsEntry | undefined;
   settings: NhlSettings;
   selectedLine?: number;
+  isPotd?: boolean;
   onOddsChange: (market: NhlMarket, playerId: number, line: number, side: 'over' | 'under', val: number | null) => void;
   onSelectLine: (market: NhlMarket, playerId: number, line: number) => void;
   variance?: MarketVarianceInfo;
@@ -25,7 +26,7 @@ interface Props {
 const fmt = (n: number | null | undefined) => (n == null ? '' : n > 0 ? `+${n}` : `${n}`);
 
 export const NhlPlayerRow: React.FC<Props> = ({
-  projection, teammates, market, entryFor, settings, selectedLine, onOddsChange, onSelectLine, variance: customVariance, onLogBet
+  projection, teammates, market, entryFor, settings, selectedLine, isPotd, onOddsChange, onSelectLine, variance: customVariance, onLogBet
 }) => {
   const [expanded, setExpanded] = useState(false);
   const mp = marketOf(projection, market);
@@ -64,11 +65,20 @@ export const NhlPlayerRow: React.FC<Props> = ({
 
   return (
     <div className={`border rounded-xl transition overflow-hidden mb-2 ${
-      qualifies ? 'border-emerald-500/70 bg-[#0c161d]' : 'border-[#222d3e] bg-[#0f1520] hover:border-slate-600'
+      isPotd
+        ? 'border-amber-400/90 bg-amber-950/15 shadow-sm shadow-amber-950/40'
+        : qualifies
+          ? 'border-emerald-500/70 bg-[#0c161d]'
+          : 'border-[#222d3e] bg-[#0f1520] hover:border-slate-600'
     }`}>
       <div onClick={() => setExpanded(!expanded)} className="p-3 cursor-pointer select-none">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div className="flex items-center gap-2 min-w-[210px] flex-wrap">
+            {isPotd && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-400 text-slate-950" title="Pick of the Day">
+                <Crown className="w-3 h-3 fill-current" /> POTD
+              </span>
+            )}
             <span className="font-bold text-white text-sm">{projection.name}</span>
             <span className="font-mono text-[10px] bg-[#182232] text-cyan-400 px-1.5 py-0.5 rounded border border-[#222d3e]">{projection.pos}</span>
             <span className="text-xs font-mono text-[#8b97ac]">{projection.team} vs {projection.opp}</span>

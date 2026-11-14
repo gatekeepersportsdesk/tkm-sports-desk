@@ -26,23 +26,25 @@ export const PlayerFormRow: React.FC<Props> = ({ form, unit = '', lineMoved, cla
         <span className="text-[#556277] uppercase font-bold text-[9px] tracking-wider">Form:</span>
 
         {/* L5 Window */}
-        {l5.games > 0 ? (
-          <span className="bg-[#121927] border border-[#222d3e] rounded px-1.5 py-0.5 text-slate-300" title={`Last 5 games: cleared in ${l5.hits}/${l5.games} games, avg ${l5.avgStat} ${unit}`}>
+        {l5.games > 0 && l5.hitRatePct !== null ? (
+          <span className="bg-[#121927] border border-[#222d3e] rounded px-1.5 py-0.5 text-slate-300" title={`Last 5 games: cleared in ${l5.hits}/${l5.games} games, avg ${l5.avgStat ?? '—'} ${unit}`}>
             <span className="text-[#8b97ac] mr-1">L5</span>
             <span className={hitRateColor(l5.hitRatePct)}>{l5.hitRatePct}%</span>
-            <span className="text-[#556277] ml-1">({l5.hits}/{l5.games} · avg {l5.avgStat}{unit})</span>
+            <span className="text-[#556277] ml-1">({l5.hits}/{l5.games} · avg {l5.avgStat ?? '—'}{unit})</span>
           </span>
         ) : (
           <span className="text-[#556277]">L5: --</span>
         )}
 
         {/* L10 Window */}
-        {l10.games > 0 && (
-          <span className="bg-[#121927] border border-[#222d3e] rounded px-1.5 py-0.5 text-slate-300" title={`Last 10 games: cleared in ${l10.hits}/${l10.games} games, avg ${l10.avgStat} ${unit}`}>
+        {l10.games > 0 && l10.hitRatePct !== null ? (
+          <span className="bg-[#121927] border border-[#222d3e] rounded px-1.5 py-0.5 text-slate-300" title={`Last 10 games: cleared in ${l10.hits}/${l10.games} games, avg ${l10.avgStat ?? '—'} ${unit}`}>
             <span className="text-[#8b97ac] mr-1">L10</span>
             <span className={hitRateColor(l10.hitRatePct)}>{l10.hitRatePct}%</span>
-            <span className="text-[#556277] ml-1">({l10.hits}/{l10.games} · avg {l10.avgStat}{unit})</span>
+            <span className="text-[#556277] ml-1">({l10.hits}/{l10.games} · avg {l10.avgStat ?? '—'}{unit})</span>
           </span>
+        ) : (
+          <span className="text-[#556277]">L10: --</span>
         )}
 
         {/* Opponent Defense Factor Badge */}

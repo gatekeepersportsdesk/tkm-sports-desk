@@ -1,6 +1,6 @@
 import React from 'react';
 import { PickOfTheDay } from '../../lib/pick_of_the_day';
-import { Star, Zap, ShieldAlert, Trophy } from 'lucide-react';
+import { Crown, Zap, Trophy } from 'lucide-react';
 import { fmtAmerican } from '../../lib/odds';
 
 interface Props {
@@ -15,7 +15,7 @@ export const PickOfTheDayCard: React.FC<Props> = ({ pick, sportLabel, isOverallB
       <div className="bg-[#121824] rounded-2xl border border-[#222d3e] p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-[#0f1520] border border-[#222d3e] flex items-center justify-center text-[#556277] shrink-0">
-            <Star className="w-4 h-4 text-[#556277]" />
+            <Crown className="w-4 h-4 text-[#556277]" />
           </div>
           <div>
             <div className="flex items-center gap-2">
@@ -57,12 +57,16 @@ export const PickOfTheDayCard: React.FC<Props> = ({ pick, sportLabel, isOverallB
       <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#222d3e]/70 mb-3">
         <div className="flex items-center gap-2">
           <div className={`p-1.5 rounded-lg flex items-center justify-center ${
-            isOverallBest ? 'bg-amber-400 text-slate-950 font-bold' : 'bg-cyan-400 text-slate-950 font-bold'
+            isOverallBest ? 'bg-amber-400 text-slate-950 font-bold' : 'bg-amber-400/90 text-slate-950 font-bold'
           }`}>
-            <Star className="w-3.5 h-3.5 fill-current" />
+            <Crown className="w-3.5 h-3.5 fill-current" />
           </div>
           <span className="text-xs font-mono uppercase tracking-wider font-bold text-white">
             {sportLabel} · Pick of the Day
+          </span>
+          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-950/90 text-amber-300 border border-amber-500/60 flex items-center gap-1">
+            <Crown className="w-3 h-3 text-amber-400" />
+            POTD
           </span>
           {isOverallBest && (
             <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 flex items-center gap-1">

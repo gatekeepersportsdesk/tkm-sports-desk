@@ -1,13 +1,13 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
-  Copy, Check, Flame, ShieldCheck, AlertCircle, ArrowUpDown, Plus, Trophy,
+  Copy, Check, Flame, ShieldCheck, AlertCircle, ArrowUpDown, Plus, Trophy, Crown,
   SlidersHorizontal, RotateCcw, Eye, X, CheckCircle2, XCircle, Clock, HelpCircle, RefreshCw,
   Download, FileSpreadsheet
 } from 'lucide-react';
 import { getEdgeColorClass, PlayerCardForm, isFormFightingLean } from '../../lib/player_card_form';
 import { fmtAmerican } from '../../lib/odds';
 import { CardRow } from '../../lib/card_core';
-import { getOddsImportMeta } from '../../lib/pick_of_the_day';
+import { getOddsImportMeta, PickOfTheDay } from '../../lib/pick_of_the_day';
 import {
   freezePickerSnapshot,
   gradePickerWithCardRows,
@@ -22,7 +22,11 @@ import {
   getDailyPickerSnapshot,
   downloadPickerExport,
   exportPickerFullDatasetCsv,
-  exportPickerGameByGameCsv
+  exportPickerGameByGameCsv,
+  classifyPickerBucket,
+  isMatchingPotd,
+  normalizeMarketKey,
+  getSeededGameByGameRollups
 } from '../../lib/picker_grading';
 
 export interface PlayItem {
@@ -45,6 +49,7 @@ export interface PlayItem {
   unit?: string;
   form?: PlayerCardForm;
   formWarning?: boolean;
+  isPotd?: boolean;
 }
 
 export type DeskPlayItem = PlayItem;
@@ -53,6 +58,7 @@ interface Props {
   sportLabel: string;
   sportKey?: 'nhl' | 'nba' | 'nfl' | 'mlb' | string;
   plays: PlayItem[];
+  pickOfTheDay?: PickOfTheDay | null;
   date?: string;
   cardRows?: CardRow[];
   onSelectPlay?: (play: PlayItem) => void;
@@ -73,6 +79,7 @@ export const TodaysPlaysSection: React.FC<Props> = ({
   sportLabel,
   sportKey,
   plays,
+  pickOfTheDay,
   date,
   cardRows = [],
   onSelectPlay,
@@ -85,6 +92,7 @@ export const TodaysPlaysSection: React.FC<Props> = ({
   const [copied, setCopied] = useState(false);
   const [ticketAdded, setTicketAdded] = useState<string | number | null>(null);
   const [activeGroup, setActiveGroup] = useState<'all' | 'edge' | 'safe' | 'avoid'>('all');
+  const [marketFilter, setMarketFilter] = useState<string>('all');
   const [scope, setScope] = useState<'today' | '7d' | 'all'>('7d');
 
   // Clear / Reset snapshot state
@@ -96,8 +104,16 @@ export const TodaysPlaysSection: React.FC<Props> = ({
   const [isInspectionOpen, setIsInspectionOpen] = useState(false);
   const [inspectSport, setInspectSport] = useState<'current' | 'all'>('current');
   const [inspectBucket, setInspectBucket] = useState<'all' | 'edge' | 'safe' | 'avoid'>('all');
+  const [inspectMarket, setInspectMarket] = useState<string>('all');
   const [inspectResult, setInspectResult] = useState<'all' | 'HIT' | 'MISS' | 'PUSH' | 'VOID' | 'PENDING'>('all');
+  const [inspectPotdOnly, setInspectPotdOnly] = useState<boolean>(false);
+  const [inspectView, setInspectView] = useState<'plays' | 'gbg'>('plays');
   const [gradingBusy, setGradingBusy] = useState(false);
+
+  useEffect(() => {
+    setMarketFilter('all');
+    setInspectMarket('all');
+  }, [sport]);
 
   // Persisted Safe Threshold per sport (default 0.58)
   const [safeThreshold, setSafeThreshold] = useState<number>(() => {
@@ -129,16 +145,15 @@ export const TodaysPlaysSection: React.FC<Props> = ({
     }
   };
 
-  // Auto-freeze official snapshot on odds import or when plays are available
+  // Auto-freeze official snapshot on odds import or when plays are available (persists POTD crown)
   useEffect(() => {
     if (plays.length > 0) {
       const importMeta = getOddsImportMeta(sport, todayStr);
       const existing = getDailyPickerSnapshot(sport, todayStr);
-      // Auto-update if no existing snapshot or if a newer odds import arrived
       const isNewerImport = importMeta && (!existing || existing.timestamp < importMeta.at);
-      freezePickerSnapshot(sport, todayStr, plays, safeThreshold, !!isNewerImport);
+      freezePickerSnapshot(sport, todayStr, plays, safeThreshold, !!isNewerImport, pickOfTheDay);
     }
-  }, [sport, todayStr, plays, safeThreshold, resetNonce]);
+  }, [sport, todayStr, plays, safeThreshold, resetNonce, pickOfTheDay]);
 
   // Listen for odds imports or grading sweep events
   useEffect(() => {
@@ -146,12 +161,12 @@ export const TodaysPlaysSection: React.FC<Props> = ({
       const detail = (e as CustomEvent).detail;
       if (detail && detail.sport === sport && detail.date === todayStr) {
         if (plays.length > 0) {
-          freezePickerSnapshot(sport, todayStr, plays, safeThreshold, true);
+          freezePickerSnapshot(sport, todayStr, plays, safeThreshold, true, pickOfTheDay);
           setResetNonce(n => n + 1);
         }
       }
     };
-    const onGraded = (e: Event) => {
+    const onGraded = () => {
       setResetNonce(n => n + 1);
       setLastSweep(getLastSweepMeta());
     };
@@ -161,7 +176,7 @@ export const TodaysPlaysSection: React.FC<Props> = ({
       window.removeEventListener('gatekeep_odds_imported', onOddsImported);
       window.removeEventListener('gatekeep_picker_graded', onGraded);
     };
-  }, [sport, todayStr, plays, safeThreshold]);
+  }, [sport, todayStr, plays, safeThreshold, pickOfTheDay]);
 
   // Auto-grade against cardRows
   useEffect(() => {
@@ -170,51 +185,56 @@ export const TodaysPlaysSection: React.FC<Props> = ({
     }
   }, [sport, cardRows, resetNonce]);
 
+  const availableMarkets = useMemo(() => {
+    const map = new Map<string, { key: string; label: string; count: number }>();
+    for (const p of plays) {
+      const key = normalizeMarketKey(p.market);
+      const label = p.marketLabel || (key === 'shots' ? 'Shots' : key === 'points' ? 'Points' : key.toUpperCase());
+      const cur = map.get(key);
+      if (cur) cur.count++;
+      else map.set(key, { key, label, count: 1 });
+    }
+    return Array.from(map.values());
+  }, [plays]);
 
-  // Partition plays strictly per rules
-  // 1. Edge plays: high edge (edge > 0) + model probability >= 55% + has odds
-  // 2. Safe plays: high model probability (>= safeThreshold) + has odds
-  // 3. Avoid: no odds or model probability < 50%
+  const marketFilteredPlays = useMemo(() => {
+    if (marketFilter === 'all') return plays;
+    return plays.filter(p => normalizeMarketKey(p.market) === marketFilter);
+  }, [plays, marketFilter]);
+
+  // Partition plays using STRICTLY MUTUALLY EXCLUSIVE rules:
+  // 1. EDGE: high edge (edge > 0) + model probability >= 55% + posted odds
+  // 2. else SAFE: model probability >= safeThreshold + posted odds (Edge plays NEVER double-list here)
+  // 3. else AVOID: no odds or below thresholds
   const groups = useMemo(() => {
     const edgePlays: PlayItem[] = [];
     const safePlays: PlayItem[] = [];
     const avoidPlays: PlayItem[] = [];
 
-    for (const p of plays) {
+    for (const p of marketFilteredPlays) {
       const prob = probOf(p);
       const hasOdds = (p.hasMarket !== false) && (p.hasOdds !== false) && p.odds != null;
-      const validEdge = p.edge != null && Number.isFinite(p.edge) && Math.abs(p.edge) <= 50;
+      const { isEdge, isSafe } = classifyPickerBucket(prob, p.edge, hasOdds, safeThreshold);
 
-      // Avoid: no odds OR model probability < 50% OR invalid/missing edge
-      if (!hasOdds || !validEdge || prob < 0.50) {
-        avoidPlays.push(p);
-        continue;
-      }
-
-      // Edge plays: requires valid posted price, valid edge_pp, edge > 0, model win >= 55%
-      if (p.edge > 0 && prob >= 0.55) {
+      if (isEdge) {
         edgePlays.push(p);
-      }
-
-      // Safe plays: model win >= safeThreshold, valid posted price and valid edge
-      if (prob >= safeThreshold) {
+      } else if (isSafe) {
         safePlays.push(p);
+      } else {
+        avoidPlays.push(p);
       }
     }
 
-    // Sort edge plays by edge descending
     edgePlays.sort((a, b) => b.edge - a.edge);
-
-    // Sort safe plays by probability descending
     safePlays.sort((a, b) => probOf(b) - probOf(a));
 
     return { edgePlays, safePlays, avoidPlays };
-  }, [plays, safeThreshold]);
+  }, [marketFilteredPlays, safeThreshold]);
 
-  // Picker performance stats for the selected scope
+  // Picker performance stats for the selected scope & market filter
   const perf = useMemo(() => {
-    return getPickerPerformance(sport, scope, todayStr);
-  }, [sport, scope, todayStr, cardRows, plays]);
+    return getPickerPerformance(sport, scope, todayStr, marketFilter);
+  }, [sport, scope, todayStr, marketFilter, cardRows, plays, resetNonce]);
 
   // Handle clipboard copy
   const handleCopyEdgePlays = async () => {
@@ -264,17 +284,8 @@ export const TodaysPlaysSection: React.FC<Props> = ({
     if (activeGroup === 'edge') return groups.edgePlays;
     if (activeGroup === 'safe') return groups.safePlays;
     if (activeGroup === 'avoid') return groups.avoidPlays;
-    // 'all': concatenate edge, safe, and other ranked plays
-    const seen = new Set<string | number>();
-    const out: PlayItem[] = [];
-    for (const p of [...groups.edgePlays, ...groups.safePlays, ...plays]) {
-      if (!seen.has(p.id)) {
-        seen.add(p.id);
-        out.push(p);
-      }
-    }
-    return out;
-  }, [activeGroup, groups, plays]);
+    return [...groups.edgePlays, ...groups.safePlays, ...groups.avoidPlays];
+  }, [activeGroup, groups]);
 
   const handleExportFull = (sportTarget: string = sportKey || sport || 'all') => {
     const csv = exportPickerFullDatasetCsv(sportTarget, scope, todayStr);
@@ -353,7 +364,37 @@ export const TodaysPlaysSection: React.FC<Props> = ({
       )}
 
 
-      {/* 4 Bucket Selector Tabs */}
+      {/* Multi-Market Filter Pills (when slate has > 1 market) */}
+      {availableMarkets.length > 1 && (
+        <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+          <span className="text-[10px] text-[#8b97ac] uppercase font-bold mr-1">Market:</span>
+          <button
+            onClick={() => setMarketFilter('all')}
+            className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
+              marketFilter === 'all'
+                ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-bold'
+                : 'bg-[#0f1520] text-[#8b97ac] border-[#222d3e] hover:text-white'
+            }`}
+          >
+            All ({plays.length})
+          </button>
+          {availableMarkets.map(m => (
+            <button
+              key={m.key}
+              onClick={() => setMarketFilter(m.key)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
+                marketFilter === m.key
+                  ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-bold'
+                  : 'bg-[#0f1520] text-[#8b97ac] border-[#222d3e] hover:text-white'
+              }`}
+            >
+              {m.label} ({m.count})
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 4 Exclusive Bucket Selector Tabs */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 pt-1">
         <button
           onClick={() => setActiveGroup('edge')}
@@ -371,7 +412,7 @@ export const TodaysPlaysSection: React.FC<Props> = ({
               {groups.edgePlays.length}
             </span>
           </div>
-          <p className="text-[10px] text-[#8b97ac] mt-1">High edge + model win &ge; 55%</p>
+          <p className="text-[10px] text-[#8b97ac] mt-1">High edge + model win &ge; 55% (exclusive)</p>
         </button>
 
         <button
@@ -390,7 +431,7 @@ export const TodaysPlaysSection: React.FC<Props> = ({
               {groups.safePlays.length}
             </span>
           </div>
-          <p className="text-[10px] text-[#8b97ac] mt-1">High model win (&ge; {(safeThreshold * 100).toFixed(0)}%)</p>
+          <p className="text-[10px] text-[#8b97ac] mt-1">Model win &ge; {(safeThreshold * 100).toFixed(0)}%, non-Edge</p>
         </button>
 
         <button
@@ -409,7 +450,7 @@ export const TodaysPlaysSection: React.FC<Props> = ({
               {groups.avoidPlays.length}
             </span>
           </div>
-          <p className="text-[10px] text-[#8b97ac] mt-1">No odds or win &lt; 50%</p>
+          <p className="text-[10px] text-[#8b97ac] mt-1">No odds or below thresholds</p>
         </button>
 
         <button
@@ -425,10 +466,10 @@ export const TodaysPlaysSection: React.FC<Props> = ({
               <ArrowUpDown className="w-3 h-3 text-purple-400" /> All Plays
             </span>
             <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-[#182232] text-white border border-[#222d3e]">
-              {plays.length}
+              {marketFilteredPlays.length}
             </span>
           </div>
-          <p className="text-[10px] text-[#8b97ac] mt-1">Full sorted edge list</p>
+          <p className="text-[10px] text-[#8b97ac] mt-1">All priced plays ({marketFilter === 'all' ? 'every market' : marketFilter})</p>
         </button>
       </div>
 
@@ -454,18 +495,29 @@ export const TodaysPlaysSection: React.FC<Props> = ({
               ? `L10 ${l10.hits}/${l10.games} · avg ${l10.avgStat}${unit}`
               : 'L10 —';
             const fightsForm = p.formWarning ?? isFormFightingLean(p.form, sideStr, p.line);
+            const potdMatch = Boolean(p.isPotd || isMatchingPotd(p, pickOfTheDay));
 
             return (
               <div
                 key={p.id}
                 onClick={() => onSelectPlay?.(p)}
-                className={`p-2.5 rounded-xl flex flex-col gap-1.5 bg-[#0f1520] border border-[#222d3e] hover:border-slate-500 transition ${
-                  onSelectPlay ? 'cursor-pointer' : ''
-                }`}
+                className={`p-2.5 rounded-xl flex flex-col gap-1.5 transition ${
+                  potdMatch
+                    ? 'bg-amber-950/20 border border-amber-500/70 hover:border-amber-400'
+                    : 'bg-[#0f1520] border border-[#222d3e] hover:border-slate-500'
+                } ${onSelectPlay ? 'cursor-pointer' : ''}`}
               >
                 {/* Primary Row */}
                 <div className="flex items-center justify-between gap-2 flex-wrap sm:flex-nowrap">
                   <div className="flex items-center gap-2 flex-wrap min-w-0">
+                    {potdMatch && (
+                      <span
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-400 text-slate-950 shrink-0"
+                        title="Pick of the Day — Highest EV priced play"
+                      >
+                        <Crown className="w-3 h-3 fill-current" /> POTD
+                      </span>
+                    )}
                     <span className="font-bold text-white truncate">{p.player}</span>
                     <span className="text-[10px] text-[#8b97ac] shrink-0">{p.team} vs {p.opp}</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#182232] text-cyan-300 shrink-0">
@@ -851,6 +903,54 @@ export const TodaysPlaysSection: React.FC<Props> = ({
                   <option value="PUSH">Pushes</option>
                   <option value="VOID">Voids (DNP)</option>
                 </select>
+
+                {/* Market Filter */}
+                <select
+                  value={inspectMarket}
+                  onChange={e => setInspectMarket(e.target.value)}
+                  className="bg-[#182232] text-cyan-300 font-mono text-xs border border-[#222d3e] rounded-lg px-2.5 py-1 outline-none cursor-pointer"
+                >
+                  <option value="all">All Markets</option>
+                  <option value="shots">NHL Shots</option>
+                  <option value="points">NHL Points / NBA PTS</option>
+                  <option value="assists">NBA Assists</option>
+                  <option value="rebounds">NBA Rebounds</option>
+                  <option value="pra">NBA PRA</option>
+                  <option value="threes">NBA 3PM</option>
+                  <option value="receptions">NFL Receptions</option>
+                </select>
+
+                {/* POTD Only Toggle */}
+                <button
+                  onClick={() => setInspectPotdOnly(v => !v)}
+                  className={`px-2.5 py-1 text-[11px] rounded-lg border flex items-center gap-1 transition cursor-pointer ${
+                    inspectPotdOnly
+                      ? 'bg-amber-400 text-slate-950 border-amber-300 font-bold'
+                      : 'bg-[#121824] text-amber-300 border-[#222d3e] hover:border-amber-500/50'
+                  }`}
+                >
+                  <Crown className="w-3 h-3" /> POTD Only
+                </button>
+
+                {/* View Mode: Tracked Plays vs Game-by-Game Rollups */}
+                <div className="flex items-center gap-1 bg-[#121824] p-0.5 rounded-lg border border-[#222d3e]">
+                  <button
+                    onClick={() => setInspectView('plays')}
+                    className={`px-2 py-1 text-[11px] rounded transition cursor-pointer ${
+                      inspectView === 'plays' ? 'bg-cyan-600 text-white font-bold' : 'text-[#8b97ac] hover:text-white'
+                    }`}
+                  >
+                    Play-by-Play
+                  </button>
+                  <button
+                    onClick={() => setInspectView('gbg')}
+                    className={`px-2 py-1 text-[11px] rounded transition cursor-pointer ${
+                      inspectView === 'gbg' ? 'bg-cyan-600 text-white font-bold' : 'text-[#8b97ac] hover:text-white'
+                    }`}
+                  >
+                    Game Rollups
+                  </button>
+                </div>
               </div>
 
               {/* Modal Export and Grade Actions */}
@@ -899,8 +999,8 @@ export const TodaysPlaysSection: React.FC<Props> = ({
             {/* Modal Stats Bar */}
             {(() => {
               const currentActivePerf = inspectSport === 'all'
-                ? getAllSportsPickerPerformance(scope, todayStr)
-                : perf;
+                ? getAllSportsPickerPerformance(scope, todayStr, inspectMarket)
+                : getPickerPerformance(sport, scope, todayStr, inspectMarket);
               const targetBucket = inspectBucket === 'edge' ? currentActivePerf.edge
                 : inspectBucket === 'safe' ? currentActivePerf.safe
                 : inspectBucket === 'avoid' ? currentActivePerf.avoid
@@ -917,7 +1017,7 @@ export const TodaysPlaysSection: React.FC<Props> = ({
 
               return (
                 <div className="px-4 py-2 bg-[#121824] border-b border-[#222d3e] flex items-center justify-between text-xs flex-wrap gap-2">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 flex-wrap">
                     <span className="text-[#8b97ac]">
                       Scope: <strong className="text-white uppercase">{scope}</strong> ({inspectSport === 'all' ? 'All Models' : sportLabel})
                     </span>
@@ -927,6 +1027,13 @@ export const TodaysPlaysSection: React.FC<Props> = ({
                     <span className="text-[#8b97ac]">
                       Record: <strong className="text-white">{targetBucket.hits}W - {targetBucket.misses}L</strong> ({targetBucket.decided} decided)
                     </span>
+                    {currentActivePerf.potd && currentActivePerf.potd.decided + currentActivePerf.potd.pending > 0 && (
+                      <span className="text-amber-300 flex items-center gap-1">
+                        <Crown className="w-3 h-3 text-amber-400" />
+                        POTD: <strong>{currentActivePerf.potd.hits}W-{currentActivePerf.potd.misses}L</strong>
+                        {currentActivePerf.potd.hitRate !== null ? ` (${currentActivePerf.potd.hitRate}%)` : ''}
+                      </span>
+                    )}
                     {targetBucket.pending > 0 && (
                       <span className="text-amber-400 font-bold">
                         {targetBucket.pending} pending
@@ -934,21 +1041,54 @@ export const TodaysPlaysSection: React.FC<Props> = ({
                     )}
                   </div>
                   <span className="text-[11px] text-[#556277]">
-                    Official box score lines · Real minutes only
+                    Exclusive Edge &gt; Safe &gt; Avoid · Official box scores
                   </span>
                 </div>
               );
             })()}
 
-            {/* Scrollable Plays Table */}
+            {/* Scrollable Plays Table / Game-by-Game Rollups */}
             <div className="overflow-y-auto flex-1 p-3 space-y-2 max-h-[55vh]">
-              {(() => {
+              {inspectView === 'gbg' ? (() => {
+                const rollups = getSeededGameByGameRollups(inspectSport === 'all' ? 'all' : sport);
+                if (rollups.length === 0) {
+                  return (
+                    <div className="p-8 text-center text-xs text-[#556277] bg-[#0b0f14] rounded-xl border border-[#222d3e]">
+                      No seeded game-by-game rollups found for this filter.
+                    </div>
+                  );
+                }
+                return rollups.map((g, i) => (
+                  <div
+                    key={`${g.date}_${g.sport}_${g.matchup}_${i}`}
+                    className="p-2.5 rounded-xl bg-[#0b0f14] border border-[#222d3e] flex items-center justify-between gap-3 flex-wrap text-xs"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#182232] text-cyan-300 border border-[#222d3e]">
+                        {g.date} · {g.sport}
+                      </span>
+                      <span className="font-bold text-white">{g.matchup}</span>
+                      <span className="text-[10px] text-[#8b97ac]">
+                        {g.totalPlays} plays (Edge {g.edgePlays} · Safe {g.safePlays})
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 font-mono">
+                      <span className="text-white">{g.hits}W - {g.misses}L</span>
+                      <span className={`font-bold ${(g.winRatePct ?? 0) >= 55 ? 'text-emerald-400' : 'text-amber-300'}`}>
+                        {g.winRatePct != null ? `${g.winRatePct.toFixed(1)}%` : '—'}
+                      </span>
+                    </div>
+                  </div>
+                ));
+              })() : (() => {
                 const playsList = getPickerPlaysForInspection(
                   inspectSport === 'all' ? 'all' : sport,
                   scope,
                   todayStr,
                   inspectBucket,
-                  inspectResult
+                  inspectResult,
+                  inspectMarket,
+                  inspectPotdOnly
                 );
 
                 if (playsList.length === 0) {
@@ -959,7 +1099,7 @@ export const TodaysPlaysSection: React.FC<Props> = ({
                   );
                 }
 
-                return playsList.map((p, idx) => {
+                return playsList.map((p: InspectedPickerPlay, idx) => {
                   const sideStr = p.side.toUpperCase();
                   const isWon = p.result === 'HIT';
                   const isLost = p.result === 'MISS';
@@ -970,12 +1110,21 @@ export const TodaysPlaysSection: React.FC<Props> = ({
                   return (
                     <div
                       key={`${p.date}_${p.sport}_${p.id}_${idx}`}
-                      className="p-2.5 rounded-xl bg-[#0b0f14] border border-[#222d3e] flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap hover:border-slate-600 transition text-xs"
+                      className={`p-2.5 rounded-xl flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap transition text-xs ${
+                        p.isPotd
+                          ? 'bg-amber-950/20 border border-amber-500/70 hover:border-amber-400'
+                          : 'bg-[#0b0f14] border border-[#222d3e] hover:border-slate-600'
+                      }`}
                     >
                       <div className="flex items-center gap-2 flex-wrap min-w-0">
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-[#182232] text-cyan-300 border border-[#222d3e]">
                           {p.date} · {p.sport.toUpperCase()}
                         </span>
+                        {p.isPotd && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-400 text-slate-950 inline-flex items-center gap-1">
+                            <Crown className="w-3 h-3 fill-current" /> POTD
+                          </span>
+                        )}
                         <span className="font-bold text-white truncate">{p.player}</span>
                         <span className="text-[10px] text-[#8b97ac]">{p.team} vs {p.opp}</span>
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#182232] text-sky-300">
@@ -987,9 +1136,14 @@ export const TodaysPlaysSection: React.FC<Props> = ({
                             EDGE
                           </span>
                         )}
-                        {p.isSafe && (
+                        {!p.isEdge && p.isSafe && (
                           <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-cyan-950/80 text-cyan-300 border border-cyan-700">
                             SAFE
+                          </span>
+                        )}
+                        {p.isAvoid && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-950/80 text-rose-300 border border-rose-700">
+                            AVOID
                           </span>
                         )}
                       </div>

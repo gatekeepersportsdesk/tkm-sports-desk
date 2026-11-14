@@ -4,23 +4,23 @@
  * Provides compact, scannable form metrics under player cards:
  * - L5 & L10 hit rates against the current line
  * - L5 & L10 average actual stats
- * - Games played in window
+ * - Games played in window (missing form returns null/empty, NEVER 0%)
  * - Opponent ranking indicator (Top 10 vs Bottom 10 defense)
  * - NBA minutes trend (L5 vs season average)
- * - Line movement indicators
  * - Concise "Why this lean" one-liner
  */
 
 export interface FormWindow {
   games: number;
   hits: number;
-  hitRatePct: number;
-  avgStat: number;
+  hitRatePct: number | null;
+  avgStat: number | null;
 }
 
 export interface PlayerCardForm {
   l5: FormWindow;
   l10: FormWindow;
+  hasForm: boolean;
   whyThisLean: string;
   oppTier: 'top10_tough' | 'bottom10_soft' | 'neutral';
   oppBadge: string;
@@ -34,9 +34,10 @@ export interface PlayerCardForm {
 /**
  * Computes L5 and L10 hit rates and averages from recent game logs.
  * `logs` are ordered most recent first.
+ * Missing logs yield `{ games: 0, hits: 0, hitRatePct: null, avgStat: null }`, never `0%`.
  */
 export function computePlayerCardForm(
-  logs: number[],
+  logs: number[] | null | undefined,
   line: number,
   lean: 'OVER' | 'UNDER' = 'OVER',
   options?: {
@@ -53,7 +54,7 @@ export function computePlayerCardForm(
     const slice = safeLogs.slice(0, windowSize);
     const games = slice.length;
     if (games === 0) {
-      return { games: 0, hits: 0, hitRatePct: 0, avgStat: 0 };
+      return { games: 0, hits: 0, hitRatePct: null, avgStat: null };
     }
     let hits = 0;
     let sum = 0;
@@ -72,6 +73,7 @@ export function computePlayerCardForm(
 
   const l5 = calcWindow(5);
   const l10 = calcWindow(10);
+  const hasForm = l5.games > 0 || l10.games > 0;
 
   // Opponent Defense Ranking Indicator
   let oppTier: 'top10_tough' | 'bottom10_soft' | 'neutral' = 'neutral';
@@ -111,15 +113,15 @@ export function computePlayerCardForm(
     whyParts.push(`Positive EV (+${edge.toFixed(1)}pp edge)`);
   }
 
-  if (l10.games >= 5) {
+  if (l10.games >= 5 && l10.hitRatePct !== null) {
     if (l10.hitRatePct >= 70) {
       whyParts.push(`L10 hit rate ${l10.hitRatePct}% (${l10.hits}/${l10.games})`);
     } else if (l10.hitRatePct <= 30 && lean === 'UNDER') {
       whyParts.push(`Under in ${l10.games - l10.hits}/${l10.games} L10`);
-    } else if (l5.games >= 3 && l5.hitRatePct >= 80) {
+    } else if (l5.games >= 3 && l5.hitRatePct !== null && l5.hitRatePct >= 80) {
       whyParts.push(`Hot L5: ${l5.hits}/${l5.games} cleared`);
     }
-  } else if (l5.games >= 3 && l5.hitRatePct >= 75) {
+  } else if (l5.games >= 3 && l5.hitRatePct !== null && l5.hitRatePct >= 75) {
     whyParts.push(`Recent form: ${l5.hits}/${l5.games} cleared`);
   }
 
@@ -140,6 +142,7 @@ export function computePlayerCardForm(
   return {
     l5,
     l10,
+    hasForm,
     whyThisLean,
     oppTier,
     oppBadge,
@@ -171,18 +174,19 @@ export function getEdgeColorClass(edge: number | null | undefined, hasMarket: bo
  * - Under selected but L10 avg clearly above line, or L10 hit rate on side <= 40%
  * - Over selected but L10 avg clearly below line, or L10 hit rate on side <= 40%
  * - Falls back to L5 if L10 has fewer than 5 games
+ * - Returns false when logs are missing (never warns on null form)
  */
 export function isFormFightingLean(
   form: PlayerCardForm | undefined | null,
   side: 'OVER' | 'UNDER' | 'over' | 'under' | string,
   line: number
 ): boolean {
-  if (!form) return false;
+  if (!form || !form.hasForm) return false;
   const isOver = side.toUpperCase() === 'OVER';
   const { l5, l10 } = form;
 
   // L10 has primary weight if >= 5 games
-  if (l10 && l10.games >= 5) {
+  if (l10 && l10.games >= 5 && l10.hitRatePct !== null && l10.avgStat !== null) {
     if (isOver) {
       return l10.hitRatePct <= 40 || l10.avgStat < line;
     } else {
@@ -191,7 +195,7 @@ export function isFormFightingLean(
   }
 
   // Fallback to L5 if >= 3 games
-  if (l5 && l5.games >= 3) {
+  if (l5 && l5.games >= 3 && l5.hitRatePct !== null && l5.avgStat !== null) {
     if (isOver) {
       return l5.hitRatePct <= 40 || l5.avgStat < line;
     } else {
@@ -201,4 +205,3 @@ export function isFormFightingLean(
 
   return false;
 }
-

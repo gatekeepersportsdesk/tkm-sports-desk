@@ -9,10 +9,15 @@ import {
   clearDailyPickerSnapshot,
   getDailyPickerSnapshot,
   gradeNbaPickerWithBoxLines,
-  getPickerPlaysForInspection
+  getPickerPlaysForInspection,
+  classifyPickerBucket,
+  seedPickerHistoryFromCsv,
+  loadPickerSeedSync,
+  getSeededGameByGameRollups
 } from './picker_grading';
 import { PlayItem } from '../components/common/TodaysPlaysSection';
 import { CardRow } from './card_core';
+import { PickOfTheDay } from './pick_of_the_day';
 
 test('picker_grading: Normalization helpers', () => {
   assert.strictEqual(normalizePlayerName('Connor McDavid Jr.'), 'connor mcdavid');
@@ -21,10 +26,31 @@ test('picker_grading: Normalization helpers', () => {
   assert.strictEqual(normalizeMarketKey('Points'), 'points');
   assert.strictEqual(normalizeMarketKey('rec'), 'receptions');
   assert.strictEqual(normalizeMarketKey('tpm'), 'threes');
+  assert.strictEqual(normalizeMarketKey('reb'), 'rebounds');
+  assert.strictEqual(normalizeMarketKey('ast'), 'assists');
+  assert.strictEqual(normalizeMarketKey('pra'), 'pra');
 });
 
-test('picker_grading: Freezing snapshot classifies buckets and protects historical immutability', () => {
-  // Clear any mock
+test('picker_grading: Strict mutually exclusive Edge vs Safe vs Avoid bucket assignment', () => {
+  // EDGE beats SAFE even when prob >= safeThreshold
+  const edgeHighProb = classifyPickerBucket(0.64, 7.5, true, 0.58);
+  assert.deepStrictEqual(edgeHighProb, { isEdge: true, isSafe: false, isAvoid: false });
+
+  // Non-edge with prob >= safeThreshold -> SAFE only
+  const safeOnly = classifyPickerBucket(0.62, -1.2, true, 0.58);
+  assert.deepStrictEqual(safeOnly, { isEdge: false, isSafe: true, isAvoid: false });
+
+  // Positive edge but prob < 0.55 and < safeThreshold -> AVOID
+  const lowProb = classifyPickerBucket(0.51, 3.0, true, 0.58);
+  assert.deepStrictEqual(lowProb, { isEdge: false, isSafe: false, isAvoid: true });
+
+  // Unpriced -> AVOID even with high prob
+  const noOdds = classifyPickerBucket(0.68, 0, false, 0.58);
+  assert.deepStrictEqual(noOdds, { isEdge: false, isSafe: false, isAvoid: true });
+});
+
+test('picker_grading: Freezing snapshot classifies exclusive buckets, stamps POTD crown, and protects historical immutability', () => {
+  clearDailyPickerSnapshot('nhl_test', '2026-11-09');
   const plays: PlayItem[] = [
     {
       id: 'p1',
@@ -48,9 +74,9 @@ test('picker_grading: Freezing snapshot classifies buckets and protects historic
       market: 'points',
       side: 'OVER',
       line: 1.5,
-      odds: +110,
-      prob: 0.52,
-      edge: 2.1,
+      odds: -145,
+      prob: 0.61,
+      edge: -0.5,
       hasOdds: true,
       hasMarket: true
     },
@@ -70,16 +96,40 @@ test('picker_grading: Freezing snapshot classifies buckets and protects historic
     }
   ];
 
+  const potd: PickOfTheDay = {
+    sport: 'nhl',
+    sportLabel: 'NHL Shots & Points',
+    player: 'Connor McDavid',
+    team: 'EDM',
+    opp: 'CGY',
+    market: 'sog',
+    marketLabel: 'Shots on Goal',
+    side: 'over',
+    line: 3.5,
+    odds: -115,
+    modelProb: 0.62,
+    edge: 7.5,
+    ev: 0.16
+  };
+
   const date = '2026-11-09';
-  const snap1 = freezePickerSnapshot('nhl_test', date, plays, 0.58);
+  const snap1 = freezePickerSnapshot('nhl_test', date, plays, 0.58, false, potd);
   assert.ok(snap1 !== null);
   assert.strictEqual(snap1.plays.length, 3);
 
-  // McDavid has edge 7.5% & prob 62% -> both Edge and Safe
+  // McDavid meets Edge -> Edge ONLY (NOT Safe) and stamped POTD
   const mcdavid = snap1.plays.find(p => p.player === 'Connor McDavid');
   assert.strictEqual(mcdavid?.isEdge, true);
-  assert.strictEqual(mcdavid?.isSafe, true);
+  assert.strictEqual(mcdavid?.isSafe, false, 'Edge plays must NEVER double-list under Safe');
   assert.strictEqual(mcdavid?.isAvoid, false);
+  assert.strictEqual(mcdavid?.isPotd, true);
+
+  // Draisaitl has prob 61% but negative edge -> Safe ONLY (different market: points)
+  const drai = snap1.plays.find(p => p.player === 'Leon Draisaitl');
+  assert.strictEqual(drai?.isEdge, false);
+  assert.strictEqual(drai?.isSafe, true);
+  assert.strictEqual(drai?.isAvoid, false);
+  assert.strictEqual(drai?.isPotd, false);
 
   // Unpriced rookie -> Avoid (no odds)
   const rookie = snap1.plays.find(p => p.player === 'Unpriced Rookie');
@@ -93,7 +143,7 @@ test('picker_grading: Freezing snapshot classifies buckets and protects historic
   assert.strictEqual(snap2?.plays.length, 3, 'Historical membership must stay frozen');
 });
 
-test('picker_grading: Grading against card rows settles outcomes and computes hit rates', () => {
+test('picker_grading: Grading against multi-market card rows settles shots & points exclusively and supports market/POTD filters', () => {
   const cardRows: CardRow[] = [
     {
       id: 'c1',
@@ -118,19 +168,60 @@ test('picker_grading: Grading against card rows settles outcomes and computes hi
       actual: 5,
       minutes: 23,
       err: 0.8
+    },
+    {
+      id: 'c2',
+      date: '2026-11-09',
+      capturedAt: Date.now(),
+      gameId: 'g1',
+      market: 'points',
+      playerId: 102,
+      name: 'Leon Draisaitl',
+      team: 'EDM',
+      opp: 'CGY',
+      mu: 1.7,
+      r: 10,
+      line: 1.5,
+      lean: 'OVER',
+      pOver: 0.61,
+      pm: 21,
+      avg: 1.5,
+      inputs: 'REAL',
+      avail: 'ACTIVE',
+      result: 'HIT',
+      actual: 2,
+      minutes: 22,
+      err: 0.3
     }
   ];
 
   gradePickerWithCardRows('nhl_test', cardRows);
 
-  const perf = getPickerPerformance('nhl_test', 'today', '2026-11-09');
-  assert.strictEqual(perf.edge.hits, 1);
-  assert.strictEqual(perf.edge.decided, 1);
-  assert.strictEqual(perf.edge.hitRate, 100);
+  const perfAll = getPickerPerformance('nhl_test', 'today', '2026-11-09', 'all');
+  assert.strictEqual(perfAll.edge.hits, 1);
+  assert.strictEqual(perfAll.edge.decided, 1);
+  assert.strictEqual(perfAll.edge.hitRate, 100);
+  // Safe bucket must only contain Draisaitl (never McDavid)
+  assert.strictEqual(perfAll.safe.hits, 1);
+  assert.strictEqual(perfAll.safe.decided, 1);
+  assert.strictEqual(perfAll.totalDecided, 2);
+  assert.strictEqual(perfAll.potd?.hits, 1);
+  assert.strictEqual(perfAll.potd?.decided, 1);
 
-  assert.strictEqual(perf.safe.hits, 1);
-  assert.strictEqual(perf.safe.decided, 1);
-  assert.strictEqual(perf.safe.hitRate, 100);
+  // Market filter: shots shows only McDavid (Edge), points shows only Draisaitl (Safe)
+  const perfShots = getPickerPerformance('nhl_test', 'today', '2026-11-09', 'sog');
+  assert.strictEqual(perfShots.edge.decided, 1);
+  assert.strictEqual(perfShots.safe.decided, 0);
+
+  const perfPoints = getPickerPerformance('nhl_test', 'today', '2026-11-09', 'points');
+  assert.strictEqual(perfPoints.edge.decided, 0);
+  assert.strictEqual(perfPoints.safe.decided, 1);
+
+  const potdRows = getPickerPlaysForInspection('nhl_test', 'today', '2026-11-09', 'all', 'all', 'all', true);
+  assert.strictEqual(potdRows.length, 1);
+  assert.strictEqual(potdRows[0].player, 'Connor McDavid');
+  assert.strictEqual(potdRows[0].isPotd, true);
+  assert.strictEqual(potdRows[0].result, 'HIT');
 });
 
 test('picker_grading: clearDailyPickerSnapshot removes frozen snapshot and allows re-freezing', () => {
@@ -157,7 +248,6 @@ test('picker_grading: clearDailyPickerSnapshot removes frozen snapshot and allow
   clearDailyPickerSnapshot('nba_test', '2026-11-10');
   assert.strictEqual(getDailyPickerSnapshot('nba_test', '2026-11-10'), null);
 
-  // Now we can re-freeze with corrected plays
   const correctedPlays: PlayItem[] = [
     {
       id: 'p_clear_corr',
@@ -178,8 +268,8 @@ test('picker_grading: clearDailyPickerSnapshot removes frozen snapshot and allow
   assert.strictEqual(snap?.plays[0].line, 27.5);
 });
 
-test('picker_grading: gradeNbaPickerWithBoxLines grades NBA plays directly from box lines', () => {
-
+test('picker_grading: gradeNbaPickerWithBoxLines grades NBA plays across pts/reb/ast/pra from box lines', () => {
+  clearDailyPickerSnapshot('nba_box_test', '2026-11-10');
   const plays: PlayItem[] = [
     {
       id: 'nba_p1',
@@ -208,10 +298,24 @@ test('picker_grading: gradeNbaPickerWithBoxLines grades NBA plays directly from 
       edge: 6.0,
       hasOdds: true,
       hasMarket: true
+    },
+    {
+      id: 'nba_p3',
+      player: 'Jalen Brunson',
+      team: 'NYK',
+      opp: 'MIL',
+      market: 'pra',
+      side: 'OVER',
+      line: 38.5,
+      odds: -110,
+      prob: 0.60,
+      edge: 5.5,
+      hasOdds: true,
+      hasMarket: true
     }
   ];
 
-  freezePickerSnapshot('nba', '2026-11-10', plays, 0.58);
+  freezePickerSnapshot('nba', '2026-11-10', plays, 0.58, true);
 
   const boxLines = [
     {
@@ -233,20 +337,71 @@ test('picker_grading: gradeNbaPickerWithBoxLines grades NBA plays directly from 
       minutes: 32,
       dnp: false,
       actual: { pts: 21, reb: 10, ast: 3, tpm: 2 }
+    },
+    {
+      playerId: 203,
+      name: 'Jalen Brunson',
+      team: 'NYK',
+      opp: 'MIL',
+      date: '2026-11-10',
+      minutes: 34,
+      dnp: false,
+      actual: { pts: 30, reb: 4, ast: 8, tpm: 3 }
     }
   ];
 
   const gradedCount = gradeNbaPickerWithBoxLines(boxLines);
-  assert.ok(gradedCount >= 2);
+  assert.ok(gradedCount >= 3);
 
   const inspected = getPickerPlaysForInspection('nba', 'today', '2026-11-10');
-  const giannis = inspected.find((p: any) => p.player === 'Giannis Antetokounmpo');
-  const kat = inspected.find((p: any) => p.player === 'Karl-Anthony Towns');
+  const giannis = inspected.find(p => p.player === 'Giannis Antetokounmpo');
+  const kat = inspected.find(p => p.player === 'Karl-Anthony Towns');
+  const brunson = inspected.find(p => p.player === 'Jalen Brunson');
 
   assert.strictEqual(giannis?.result, 'HIT');
   assert.strictEqual(giannis?.actual, 34);
-
-  assert.strictEqual(kat?.result, 'HIT'); // under 12.5 and actual was 10
+  assert.strictEqual(kat?.result, 'HIT');
   assert.strictEqual(kat?.actual, 10);
+  assert.strictEqual(brunson?.result, 'HIT');
+  assert.strictEqual(brunson?.actual, 42);
 });
 
+test('picker_grading: Seeding CSVs loads NHL & NBA decided history idempotently, stamps POTD, and NEVER seeds NFL', () => {
+  // Synthetic guard against NFL & pending rows & existing snapshot preservation
+  clearDailyPickerSnapshot('nfl', '2026-11-12');
+  const csvSample = [
+    'Date,Sport,Matchup,Player,Team,Opponent,Market,Side,Line,Odds,Model_Win_Prob,Model_Mu,Edge_pp,Buckets,Result,Actual_Stat',
+    '2026-11-12,NFL,KC vs BUF,Travis Kelce,KC,BUF,Receptions,OVER,4.5,-110,61.0%,5.2,8.5,EDGE,WON,6',
+    '2026-11-12,NHL,EDM vs CGY,Pending Skater,EDM,CGY,Shots on Goal,OVER,3.5,-110,59.0%,3.9,5.0,EDGE,PENDING,'
+  ].join('\n');
+  seedPickerHistoryFromCsv(csvSample);
+  assert.strictEqual(getDailyPickerSnapshot('nfl', '2026-11-12'), null, 'Must never seed NFL picker history');
+
+  // Clear real seed dates so loadPickerSeedSync hydrates cleanly from public/data/gatekeep_picker_seed_*.csv
+  for (const sp of ['nhl', 'nba']) {
+    for (const d of ['2026-11-08', '2026-11-09', '2026-11-10', '2026-11-11', '2026-11-12', '2026-11-13']) {
+      clearDailyPickerSnapshot(sp, d);
+    }
+  }
+  const firstSeed = loadPickerSeedSync();
+  assert.strictEqual(firstSeed.importedPlays, 785);
+  assert.ok(firstSeed.importedDates >= 10);
+
+  // Idempotent second call must NOT overwrite existing dates
+  const secondSeed = loadPickerSeedSync();
+  assert.strictEqual(secondSeed.importedDates, 0);
+  assert.ok(secondSeed.skippedDates >= 10);
+
+  const rollups = getSeededGameByGameRollups('all');
+  assert.strictEqual(rollups.length, 130);
+  assert.strictEqual(rollups.some(r => r.sport === 'NFL'), false);
+
+  const nhlPlays = getPickerPlaysForInspection('nhl', 'all', '2026-11-14');
+  assert.ok(nhlPlays.length > 0);
+  assert.ok(nhlPlays.some(p => p.isPotd), 'Seeded NHL history must carry POTD crown');
+  assert.strictEqual(nhlPlays.some(p => p.isEdge && p.isSafe), false, 'Zero Edge+Safe overlap');
+
+  const nbaPlays = getPickerPlaysForInspection('nba', 'all', '2026-11-14');
+  assert.ok(nbaPlays.length > 0);
+  assert.ok(nbaPlays.some(p => p.isPotd), 'Seeded NBA history must carry POTD crown');
+});

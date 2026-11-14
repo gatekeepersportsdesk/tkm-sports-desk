@@ -14,6 +14,13 @@
  *  - Missing players/teams fall back gracefully with 1.0 (neutral) factor.
  */
 
+import {
+  getNhl2026GoalieForTeam,
+  getNhl2026PpForPlayer,
+  getNhl2026EsForPlayer,
+  getNhl2026ShotQualityForPlayer
+} from './nhl_2026_priors';
+
 export interface NhlGoalieRate {
   goalieName: string;
   team: string;
@@ -286,8 +293,8 @@ export function getNhlContextAdjustments(
   const adjustments: NhlContextAdjustment[] = [];
   let factor = 1.0;
 
-  // 1. Opposing Goalie Quality
-  const oppGoalie = goalieByTeam.get(normOpp);
+  // 1. Opposing Goalie Quality (2026 league-wide starter layer, fallback to base table)
+  const oppGoalie = getNhl2026GoalieForTeam(normOpp) ?? goalieByTeam.get(normOpp);
   if (oppGoalie) {
     if (oppGoalie.tier === 'elite' || oppGoalie.savePct >= 0.915) {
       factor *= 0.92;
@@ -316,8 +323,8 @@ export function getNhlContextAdjustments(
     }
   }
 
-  // 3. Power-Play Usage
-  const pp = ppByPlayer.get(normSkater);
+  // 3. Power-Play Usage (2026 skaters layer, fallback to static table)
+  const pp = getNhl2026PpForPlayer(skaterName) ?? ppByPlayer.get(normSkater);
   if (pp) {
     if (pp.ppUnit === 'PP1' || pp.ppToiPerGame >= 3.0) {
       factor *= 1.12;
@@ -331,8 +338,8 @@ export function getNhlContextAdjustments(
     }
   }
 
-  // 4. Even-Strength Usage
-  const es = esByPlayer.get(normSkater);
+  // 4. Even-Strength Usage (2026 skaters layer, fallback to static table)
+  const es = getNhl2026EsForPlayer(skaterName) ?? esByPlayer.get(normSkater);
   if (es) {
     if (es.esRank === 1 || es.esToiPerGame >= (pos === 'D' ? 19.0 : 15.5)) {
       factor *= 1.05;
@@ -343,8 +350,8 @@ export function getNhlContextAdjustments(
     }
   }
 
-  // 5. Shot Quality
-  const sq = shotQualityByPlayer.get(normSkater);
+  // 5. Shot Quality (2026 skaters layer, fallback to static table)
+  const sq = getNhl2026ShotQualityForPlayer(skaterName) ?? shotQualityByPlayer.get(normSkater);
   if (sq) {
     if (sq.highDangerShotsPer60 >= 4.0 || sq.ixgPerShot >= 0.135) {
       factor *= 1.04;

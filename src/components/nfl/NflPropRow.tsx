@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { NflPropSnapshot } from '../../types/nfl';
 import { NflPlayerDrawer } from './NflPlayerDrawer';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp, Crown } from 'lucide-react';
 import { MarketVarianceInfo, getNflMarketVariance } from '../../lib/market_variance';
 import { MarketVarianceBadge } from '../common/MarketVarianceBadge';
 import { useDisplaySettings } from '../common/DisplaySettingsContext';
@@ -11,6 +11,7 @@ import { PlayerFormRow } from '../common/PlayerFormRow';
 interface NflPropRowProps {
   snapshot: NflPropSnapshot;
   isBetPlaced: boolean;
+  isPotd?: boolean;
   onRecordBet: (snap: NflPropSnapshot) => void;
   onUpdateLine?: (player: string, line: number, overOdds: string, underOdds: string) => void;
   teammates?: NflPropSnapshot[];
@@ -21,6 +22,7 @@ interface NflPropRowProps {
 export const NflPropRow: React.FC<NflPropRowProps> = ({
   snapshot,
   isBetPlaced,
+  isPotd,
   onRecordBet,
   onUpdateLine,
   teammates,
@@ -72,9 +74,11 @@ export const NflPropRow: React.FC<NflPropRowProps> = ({
 
   return (
     <div className={`border rounded-xl transition overflow-hidden mb-2.5 ${
-      isPlay
-        ? 'border-emerald-500/60 bg-[#0c161d] shadow-sm shadow-emerald-950/40'
-        : 'border-[#222d3e] bg-[#0f1520] hover:border-slate-600'
+      isPotd
+        ? 'border-amber-400/90 bg-amber-950/15 shadow-sm shadow-amber-950/40'
+        : isPlay
+          ? 'border-emerald-500/60 bg-[#0c161d] shadow-sm shadow-emerald-950/40'
+          : 'border-[#222d3e] bg-[#0f1520] hover:border-slate-600'
     }`}>
       <div
         onClick={() => setExpanded(!expanded)}
@@ -83,6 +87,11 @@ export const NflPropRow: React.FC<NflPropRowProps> = ({
         {/* Line 1: Player info + Status Badges */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2 overflow-hidden">
+            {isPotd && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-400 text-slate-950 shrink-0" title="Pick of the Day">
+                <Crown className="w-3 h-3 fill-current" /> POTD
+              </span>
+            )}
             <span className="font-bold text-white text-sm sm:text-base truncate">
               {snapshot.player}
             </span>
@@ -244,10 +253,10 @@ export const NflPropRow: React.FC<NflPropRowProps> = ({
           </div>
         </div>
 
-        {/* Compact L5 / L10 Form & Context Row */}
+        {/* Compact L5 / L10 Form & Context Row (real logs only, never synthetic) */}
         <PlayerFormRow
           form={computePlayerCardForm(
-            [Math.round(snapshot.seasonAvg * 1.1), Math.round(snapshot.seasonAvg * 0.9), Math.round(snapshot.seasonAvg)],
+            Array.isArray((snapshot as any).recentReceptions) ? (snapshot as any).recentReceptions : [],
             snapshot.line,
             snapshot.lean,
             {
